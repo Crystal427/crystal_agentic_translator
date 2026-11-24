@@ -167,7 +167,8 @@ public enum TextChunker {
     }
 
     private static func contextTail(_ text: String, count: Int) -> String {
-        guard count > 0, text.count > count else { return text }
+        guard count > 0 else { return "" }
+        guard text.count > count else { return text }
         let suffix = String(text.suffix(count))
         guard let ending = suffix.firstIndex(where: isSentenceEnding) else { return suffix }
         return String(suffix[suffix.index(after: ending)...])

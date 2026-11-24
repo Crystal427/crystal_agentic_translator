@@ -62,6 +62,14 @@ final class TextProcessingTests: XCTestCase {
         XCTAssertTrue(chunks.allSatisfy { $0.rawText.count <= 900 })
         XCTAssertTrue(chunks.allSatisfy { !$0.source.isEmpty })
     }
+
+    func testZeroChunkContextIsEmptyOnBothSides() {
+        let source = String(repeating: "a", count: 600)
+        let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "context.txt", text: source, maxCharacters: 256, contextCharacters: 0)
+
+        XCTAssertGreaterThan(chunks.count, 1)
+        XCTAssertTrue(chunks.allSatisfy { $0.previousTail.isEmpty && $0.nextHead.isEmpty })
+    }
 }
 
 final class QualityAndPromptTests: XCTestCase {
