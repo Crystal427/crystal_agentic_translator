@@ -287,14 +287,19 @@ public struct TranslationPipeline: Sendable {
         let outputReservation = min(8_000, max(1_024, settings.controllerContext / 4))
         var endOffset = min(characters.count, startOffset + max(1, settings.controllerContext / 2))
         var windowSections: [DocumentSection] = []
-        for _ in 0..<8 {
+        for _ in 0..<64 {
             windowSections = sections.filter { $0.isExplicit && $0.startOffset < endOffset && $0.endOffset > startOffset }
             let emptyPrompt = PromptBuilder.planner(text: "", windowIndex: windowIndex, existing: existing, settings: settings, fileName: fileName, sections: windowSections)
             let fixedTokens = estimateTokens(emptyPrompt.system + "\n" + emptyPrompt.user)
             let sourceBudget = settings.controllerContext - fixedTokens - outputReservation - 512
-            guard sourceBudget > 0 else { throw TranslationPipelineError.plannerContextExceeded }
+            if sourceBudget <= 0 {
+                guard endOffset - startOffset > 1 else { throw TranslationPipelineError.plannerContextExceeded }
+                endOffset = startOffset + max(1, (endOffset - startOffset) / 2)
+                continue
+            }
             let candidateEnd = min(characters.count, startOffset + sourceBudget)
             if candidateEnd >= endOffset { break }
+            guard candidateEnd > startOffset else { throw TranslationPipelineError.plannerContextExceeded }
             endOffset = candidateEnd
         }
         guard endOffset > startOffset else { throw TranslationPipelineError.plannerContextExceeded }

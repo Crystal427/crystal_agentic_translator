@@ -772,6 +772,25 @@ final class PlannerProviderSecurityAndDiaryTests: XCTestCase {
         XCTAssertEqual(transport.recordedRequests.filter { $0.url?.path == "/v1/chat/completions" }.count - chatRequestCount, checkpoint.completedWindows.count - 1)
     }
 
+    func testPlannerShrinksWindowForDenseSectionHeadingsWithoutDroppingSections() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourceText = (1...40).map { index in "第\(index)章" + String(repeating: "題", count: 60) + "\n本文\(index)。\n" }.joined()
+        var settings = AppSettings(controllerModel: "controller", translatorModel: "translator", controllerContext: 4_096, maxChunkCharacters: 12_000, pauseAfterOverview: true)
+        settings.overviewMaxWindows = 1
+        let pipeline = TranslationPipeline(store: JobStore(rootURL: root), client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: MockLMStudioTransport()))
+        let job = try await pipeline.createJob(name: "Dense sections", sources: [SourceDocument(name: "dense.txt", text: sourceText)], series: false, settings: settings)
+        let planned = try await pipeline.run(jobID: job.id, settings: settings)
+        let checkpoint = try XCTUnwrap(planned.plannerCheckpoint)
+        XCTAssertGreaterThan(checkpoint.completedWindows.count, 1)
+        XCTAssertEqual(checkpoint.completedWindows.first?.startOffset, 0)
+        XCTAssertEqual(checkpoint.completedWindows.last?.endOffset, sourceText.count)
+        for pair in zip(checkpoint.completedWindows, checkpoint.completedWindows.dropFirst()) {
+            XCTAssertEqual(pair.0.endOffset, pair.1.startOffset)
+        }
+        XCTAssertEqual(Set(checkpoint.completedWindows.flatMap(\.sectionIDs)), Set((planned.sections ?? []).map(\.id)))
+    }
+
     func testRefineMergesLaterSectionAndCharacterEvidenceWithoutChangingLockedNames() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
