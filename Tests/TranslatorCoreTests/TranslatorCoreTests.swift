@@ -933,6 +933,20 @@ final class PlannerProviderSecurityAndDiaryTests: XCTestCase {
         XCTAssertNotEqual(resumed.chunks[0].status, .translating)
     }
 
+    func testGuideAndManualTranslationEditsNeedNoModelRequest() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = JobStore(rootURL: root)
+        let transport = MockLMStudioTransport()
+        let pipeline = TranslationPipeline(store: store, client: LMStudioClient(baseURL: "not a url", provider: .glmCodingPlan, transport: transport))
+        let job = try await pipeline.createJob(name: "Offline edits", sources: [SourceDocument(name: "story.txt", text: "第一夜")], series: false, settings: AppSettings())
+        _ = try await pipeline.updateGuide(jobID: job.id, guide: TranslationGuide(titleZh: "梦十夜"))
+        let edited = try await pipeline.editTranslation(jobID: job.id, chunkIndex: 0, translation: "第一夜")
+
+        XCTAssertEqual(edited.chunks[0].finalTranslation, "第一夜")
+        XCTAssertTrue(transport.recordedRequests.isEmpty)
+    }
+
     func testSettingsOmitLegacyTokenAndRemainBackwardCompatible() throws {
         let legacy = Data(#"{"apiToken":"legacy-only-token","controllerModel":"old-controller"}"#.utf8)
         let decoded = try JSONDecoder().decode(AppSettings.self, from: legacy)
