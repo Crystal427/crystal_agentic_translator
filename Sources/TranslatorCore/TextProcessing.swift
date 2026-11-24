@@ -76,12 +76,32 @@ public enum TextChunker {
         appendCurrent()
 
         if rawChunks.count > 1, let last = rawChunks.last, last.count < Int(Double(limit) * 0.20) {
-            let previous = rawChunks[rawChunks.count - 2]
+            let previousIndex = rawChunks.count - 2
+            let previous = rawChunks[previousIndex]
             let joined = previous + last
-            let target = joined.count / 2
-            let split = nearestLineBoundary(in: joined, to: target) ?? joined.index(joined.startIndex, offsetBy: target)
-            rawChunks[rawChunks.count - 2] = String(joined[..<split])
-            rawChunks[rawChunks.count - 1] = String(joined[split...])
+            if joined.count <= limit {
+                rawChunks[previousIndex] = joined
+                rawChunks.removeLast()
+            } else {
+                let minimumOffset = max(1, joined.count - limit)
+                let maximumOffset = min(limit, joined.count - 1)
+                let validSplits = joined.indices.filter { split in
+                    let offset = joined.distance(from: joined.startIndex, to: split)
+                    guard (minimumOffset...maximumOffset).contains(offset) else { return false }
+                    return joined[..<split].contains(where: { !$0.isWhitespace })
+                        && joined[split...].contains(where: { !$0.isWhitespace })
+                }
+                let lineSplits = validSplits.filter { joined[$0] == "\n" }
+                let candidates = lineSplits.isEmpty ? validSplits : lineSplits
+                let target = joined.count / 2
+                if let split = candidates.min(by: {
+                    abs(joined.distance(from: joined.startIndex, to: $0) - target)
+                        < abs(joined.distance(from: joined.startIndex, to: $1) - target)
+                }) {
+                    rawChunks[previousIndex] = String(joined[..<split])
+                    rawChunks[previousIndex + 1] = String(joined[split...])
+                }
+            }
         }
 
         return rawChunks.enumerated().map { index, raw in
@@ -133,11 +153,6 @@ public enum TextChunker {
     private static func sceneBreak(in text: String, minimumOffset: Int) -> String.Index? {
         guard let range = text.range(of: "\n\n", options: .backwards) else { return nil }
         return text.distance(from: text.startIndex, to: range.lowerBound) >= minimumOffset ? range.lowerBound : nil
-    }
-
-    private static func nearestLineBoundary(in text: String, to offset: Int) -> String.Index? {
-        let candidates = text.indices.filter { $0 > text.startIndex && text[$0] == "\n" }
-        return candidates.min { abs(text.distance(from: text.startIndex, to: $0) - offset) < abs(text.distance(from: text.startIndex, to: $1) - offset) }
     }
 
     private static func takeLeadingWhitespace(_ text: String) -> (String, String) {

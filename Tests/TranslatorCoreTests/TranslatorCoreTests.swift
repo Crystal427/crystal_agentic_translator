@@ -53,6 +53,15 @@ final class TextProcessingTests: XCTestCase {
         XCTAssertEqual(chunks.map(\.rawText).joined(), source)
         XCTAssertTrue(chunks.allSatisfy { $0.rawText.count <= 400 })
     }
+
+    func testTrailingWhitespaceTailDoesNotCreateEmptyOrOversizedChunk() {
+        let source = String(repeating: "a", count: 1_000) + "\n"
+        let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "tail.txt", text: source, maxCharacters: 900, contextCharacters: 20)
+
+        XCTAssertEqual(chunks.map(\.rawText).joined(), source)
+        XCTAssertTrue(chunks.allSatisfy { $0.rawText.count <= 900 })
+        XCTAssertTrue(chunks.allSatisfy { !$0.source.isEmpty })
+    }
 }
 
 final class QualityAndPromptTests: XCTestCase {
