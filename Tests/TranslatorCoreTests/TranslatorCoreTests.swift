@@ -671,6 +671,27 @@ final class URLSessionTransportIntegrationTests: XCTestCase {
         XCTAssertEqual(response.promptTokens, 7)
         XCTAssertEqual(response.completionTokens, 3)
     }
+
+    func testChatParsesBareCRAndSplitCRLFSSEOverLocalHTTP() async throws {
+        let body = Data("data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}],\r\ndata: \"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\r\rdata: [DONE]\r\r".utf8)
+        guard let crlf = body.range(of: Data("\r\n".utf8)) else { return XCTFail("Expected CRLF in test event") }
+        let server = try LocalSSEHTTPServer(body: body, splitOffsets: [crlf.lowerBound + 1])
+        let port = try server.start()
+        defer { server.stop() }
+        let client = LMStudioClient(baseURL: "http://127.0.0.1:\(port)", transport: URLSessionTransport())
+
+        let response = try await client.chat(
+            model: "translator",
+            prompt: ChatPrompt(system: "Translate.", user: "Hello."),
+            temperature: 0.5,
+            maxTokens: 64,
+            contextLength: 2_048
+        )
+
+        XCTAssertEqual(response.content, "你")
+        XCTAssertEqual(response.promptTokens, 7)
+        XCTAssertEqual(response.completionTokens, 3)
+    }
 }
 
 final class LMStudioTransportSecurityTests: XCTestCase {
@@ -824,12 +845,19 @@ private final class LocalSSEHTTPServer: @unchecked Sendable {
     private let responseFragments: [Data]
     private var listeningPort: UInt16?
 
-    init(body: Data) throws {
+    init(body: Data, splitOffsets: [Int] = []) throws {
         listener = try NWListener(using: .tcp, on: .any)
         guard let marker = body.range(of: Data("你".utf8)) else { throw LMStudioError.invalidResponse }
-        let split = marker.lowerBound + 1
         let header = Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
-        responseFragments = [header, Data(body[..<split]), Data(body[split...])]
+        let offsets = Set([marker.lowerBound + 1] + splitOffsets).filter { $0 > 0 && $0 < body.count }.sorted()
+        var fragments: [Data] = []
+        var start = 0
+        for offset in offsets {
+            fragments.append(Data(body[start..<offset]))
+            start = offset
+        }
+        fragments.append(Data(body[start...]))
+        responseFragments = [header] + fragments
         listener.stateUpdateHandler = { [weak self] state in
             switch state {
             case .ready:

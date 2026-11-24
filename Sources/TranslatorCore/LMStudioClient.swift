@@ -41,8 +41,8 @@ public struct URLSessionTransport: LMStudioTransport {
                     }
                     var lineBytes: [UInt8] = []
                     var dataLines: [String] = []
+                    var previousByteWasCarriageReturn = false
                     func processLine() {
-                        if lineBytes.last == 0x0D { lineBytes.removeLast() }
                         let line = String(decoding: lineBytes, as: UTF8.self)
                         lineBytes.removeAll(keepingCapacity: true)
                         if line.isEmpty {
@@ -58,8 +58,18 @@ public struct URLSessionTransport: LMStudioTransport {
                     }
                     for try await byte in bytes {
                         try Task.checkCancellation()
-                        if byte == 0x0A { processLine() }
-                        else { lineBytes.append(byte) }
+                        if previousByteWasCarriageReturn {
+                            previousByteWasCarriageReturn = false
+                            if byte == 0x0A { continue }
+                        }
+                        if byte == 0x0D {
+                            processLine()
+                            previousByteWasCarriageReturn = true
+                        } else if byte == 0x0A {
+                            processLine()
+                        } else {
+                            lineBytes.append(byte)
+                        }
                     }
                     try Task.checkCancellation()
                     if !lineBytes.isEmpty { processLine() }
