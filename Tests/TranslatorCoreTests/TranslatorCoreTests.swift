@@ -867,10 +867,10 @@ final class PlannerProviderSecurityAndDiaryTests: XCTestCase {
             sourceLanguage: "日语",
             genre: "小说",
             synopsis: "第一窗口情节",
-            style: TranslationStyle(narration: "克制叙述"),
+            style: TranslationStyle(narration: "克制叙述", tone: "平静", diction: "简洁", dialogue: "自然", punctuation: "中文标点"),
             characters: [CharacterEntry(source: "主人公", target: "甲", role: "最初身份", voice: "谨慎")],
             terms: [GlossaryEntry(source: "龍王", target: "龙王", category: "人名", note: "初次提及")],
-            rules: ["保留第一人称"],
+            rules: ["保留第一人称", "忠实原文", "术语一致"],
             sections: [SectionInsight(sectionID: sectionID, sourceTitle: "第一夜", sectionType: "独立小篇", summary: "主人公开始行动。", evidence: "主人公は歩く。")]
         )
         let later = TranslationGuide(
@@ -878,10 +878,10 @@ final class PlannerProviderSecurityAndDiaryTests: XCTestCase {
             sourceLanguage: "日语",
             genre: "小说",
             synopsis: "第二窗口线索",
-            style: TranslationStyle(narration: "保留内心距离"),
+            style: TranslationStyle(narration: "保留内心距离", tone: "克制", diction: "自然", dialogue: "口语", punctuation: "中文标点"),
             characters: [CharacterEntry(source: "主人公", target: "乙", gender: "男", role: "真实身份", voice: "坚定", aliases: [GlossaryAlias(source: "主人公様", target: "主人公大人")])],
             terms: [GlossaryEntry(source: "龍王", target: "王龙", category: "人名", note: "后续再次出现")],
-            rules: ["保持敬称一致"],
+            rules: ["保持敬称一致", "忠实原文", "术语一致"],
             sections: [SectionInsight(sectionID: sectionID, sourceTitle: "第一夜", sectionType: "人物线索", summary: "主人公遇到阻碍。", evidence: "主人公様は止まる。")]
         )
         let encoder = JSONEncoder()
@@ -926,7 +926,15 @@ final class PlannerProviderSecurityAndDiaryTests: XCTestCase {
         let names = (0..<240).map { String(format: "T%03d", $0) }
         let source = names.joined(separator: " ") + "\n" + String(repeating: "主人公继续前进。", count: 15_000)
         let terms = names.map { GlossaryEntry(source: $0, target: "译\($0)", note: String(repeating: "证据说明", count: 35)) }
-        let guide = TranslationGuide(titleZh: "保留所有事实", terms: terms)
+        let guide = TranslationGuide(
+            titleZh: "保留所有事实",
+            sourceLanguage: "日语",
+            genre: "小说",
+            synopsis: "主人公继续前进。",
+            style: TranslationStyle(narration: "叙述稳定", tone: "平实", diction: "自然", dialogue: "口语", punctuation: "中文标点"),
+            terms: terms,
+            rules: ["忠实原文", "术语一致", "保留段落"]
+        )
         let pipeline = TranslationPipeline(store: store, client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: transport))
         let job = try await pipeline.createJob(name: "Long guide", sources: [SourceDocument(name: "long.txt", text: source)], series: false, settings: settings)
         transport.enqueueChatResponses([String(decoding: try JSONEncoder().encode(guide), as: UTF8.self)])
