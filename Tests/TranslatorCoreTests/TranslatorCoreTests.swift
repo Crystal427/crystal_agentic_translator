@@ -129,6 +129,12 @@ final class QualityAndPromptTests: XCTestCase {
         let chinese = TranslationQuality.inspect(source: source, translation: translation, sourceLanguage: "English", targetLanguage: "简体中文", glossary: [], previousTranslation: "")
         XCTAssertTrue(chinese.hardFailures.contains { $0.message.contains("长度比异常") })
         XCTAssertTrue(chinese.hardFailures.contains { $0.message.contains("残留原文字符比例") })
+
+        for alias in ["汉语", "Mandarin", "zh-Hans-CN", "zh_Hant_TW"] {
+            let report = TranslationQuality.inspect(source: source, translation: translation, sourceLanguage: "English", targetLanguage: alias, glossary: [], previousTranslation: "")
+            XCTAssertTrue(report.hardFailures.contains { $0.message.contains("长度比异常") }, "Chinese length rules should apply to \(alias)")
+            XCTAssertTrue(report.hardFailures.contains { $0.message.contains("残留原文字符比例") }, "Chinese script rules should apply to \(alias)")
+        }
     }
 
     func testFallbackReviewUsesDesignScorePolicy() {

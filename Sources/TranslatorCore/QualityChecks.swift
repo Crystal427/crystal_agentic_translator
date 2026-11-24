@@ -94,8 +94,15 @@ public enum TranslationQuality {
     }
 
     private static func isChineseTarget(_ language: String) -> Bool {
-        let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalized == "zh" || normalized.hasPrefix("zh-") || normalized.contains("中文") || normalized.contains("chinese")
+        let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .replacingOccurrences(of: "_", with: "-")
+        let languageCode = normalized.split(separator: "-").first.map(String.init) ?? normalized
+        let chineseCodes: Set<String> = ["zh", "zho", "chi", "cmn", "yue"]
+        if chineseCodes.contains(languageCode) { return true }
+
+        let chineseNames = ["chinese", "mandarin", "cantonese", "putonghua", "hanyu", "guoyu", "中文", "汉语", "漢語", "普通话", "普通話", "国语", "國語", "华语", "華語"]
+        return chineseNames.contains(where: normalized.contains)
     }
 
     private static func inferLanguage(source: String, requested: String) -> SourceLanguage {
