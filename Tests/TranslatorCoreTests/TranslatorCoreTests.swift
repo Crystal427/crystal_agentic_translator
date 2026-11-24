@@ -1053,6 +1053,23 @@ final class PlannerProviderSecurityAndDiaryTests: XCTestCase {
 }
 
 final class URLSessionTransportIntegrationTests: XCTestCase {
+    func testGLMConnectionAcceptsThinkingOnlyResponseAtSmallBudget() async throws {
+        let payload: [String: Any] = [
+            "marker": "你",
+            "choices": [["delta": ["reasoning_content": "连接检查"], "finish_reason": "length"]],
+            "usage": ["prompt_tokens": 12, "completion_tokens": 16]
+        ]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self)
+        let server = try LocalSSEHTTPServer(body: Data("data: \(json)\n\n".utf8))
+        let port = try server.start()
+        defer { server.stop() }
+        let client = LMStudioClient(baseURL: "http://127.0.0.1:\(port)/api/coding/paas/v4", provider: .glmCodingPlan, transport: URLSessionTransport())
+
+        let models = try await client.testConnection()
+
+        XCTAssertEqual(models.map(\.key), ["glm-5.3-flash"])
+    }
+
     func testChatParsesIncrementalMultilineSSEOverLocalHTTP() async throws {
         let body = Data("data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}],\r\ndata: \"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\r\n\r\ndata: [DONE]\n\n".utf8)
         let server = try LocalSSEHTTPServer(body: body)

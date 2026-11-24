@@ -207,6 +207,7 @@ public struct LMStudioClient: Sendable {
         contextLength: Int,
         reasoningEffort: String? = nil,
         responseSchema: [String: Any]? = nil,
+        allowEmptyContent: Bool = false,
         onDelta: (@Sendable (String, String) -> Void)? = nil
     ) async throws -> ChatResult {
         let promptEstimate = estimateTokens(prompt.system + "\n" + prompt.user)
@@ -240,6 +241,7 @@ public struct LMStudioClient: Sendable {
         var finishReason: String?
         var promptTokens = 0
         var completionTokens = 0
+        var receivedChoice = false
         for try await event in transport.stream(request) {
             try Task.checkCancellation()
             if event == "[DONE]" { break }
@@ -268,6 +270,7 @@ public struct LMStudioClient: Sendable {
             guard let choices = object["choices"] as? [[String: Any]], let choice = choices.first else { continue }
             if let reason = choice["finish_reason"] as? String { finishReason = reason }
             guard let delta = choice["delta"] as? [String: Any] else { continue }
+            receivedChoice = true
             if let value = delta["content"] as? String, !value.isEmpty {
                 content += value
                 onDelta?("content", value)
@@ -280,6 +283,11 @@ public struct LMStudioClient: Sendable {
         }
         try Task.checkCancellation()
         if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let hasValidProbeResult = allowEmptyContent && receivedChoice && finishReason != nil
+                && (!reasoning.isEmpty || promptTokens > 0 || completionTokens > 0)
+            if hasValidProbeResult {
+                return ChatResult(content: content, reasoning: reasoning, finishReason: finishReason, promptTokens: promptTokens, completionTokens: completionTokens)
+            }
             let providerName = provider == .glmCodingPlan ? "GLM Coding Plan" : "LM Studio"
             throw LMStudioError.emptyCompletion(
                 provider: providerName,
@@ -304,7 +312,8 @@ public struct LMStudioClient: Sendable {
             temperature: 1,
             maxTokens: 16,
             contextLength: 1_024,
-            reasoningEffort: "max"
+            reasoningEffort: "max",
+            allowEmptyContent: true
         )
         return [LMStudioModel(key: "glm-5.3-flash", displayName: "GLM-5.3-Flash")]
     }
