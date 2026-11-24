@@ -1038,7 +1038,8 @@ final class PlannerProviderSecurityAndDiaryTests: XCTestCase {
         let store = JobStore(rootURL: root)
         let transport = MockLMStudioTransport()
         let pipeline = TranslationPipeline(store: store, client: LMStudioClient(baseURL: "not a url", provider: .glmCodingPlan, transport: transport))
-        var job = try await pipeline.createJob(name: "Offline edits", sources: [SourceDocument(name: "story.txt", text: "第一夜")], series: false, settings: AppSettings())
+        let source = String(repeating: "The narrator describes a quiet afternoon in the old house. ", count: 4) + "The quoted word 「ありがとう」 appears once."
+        var job = try await pipeline.createJob(name: "Offline edits", sources: [SourceDocument(name: "story.txt", text: source)], series: false, settings: AppSettings())
         let historicalReview = TranslationReview(
             scores: ReviewScores(accuracy: 9, completeness: 9, terminology: 8, fluency: 9, style: 9),
             verdict: "pass",
@@ -1050,15 +1051,17 @@ final class PlannerProviderSecurityAndDiaryTests: XCTestCase {
         job.chunks[0].finalTranslation = "先前译文"
         job.chunks[0].reviewScore = historicalReview.score
         try await store.save(job)
-        _ = try await pipeline.updateGuide(jobID: job.id, guide: TranslationGuide(titleZh: "梦十夜"))
+        let guideUpdated = try await pipeline.updateGuide(jobID: job.id, guide: TranslationGuide(titleZh: "梦十夜"))
+        XCTAssertEqual(guideUpdated.guide?.sourceLanguage, "")
+        let editedTranslation = "【源文】这段中文译文保留日语引语「ありがとう」，并按顺序描写人物走进旧屋、看见雨停、回忆往事与周围安静的气氛。"
         let edited = try await pipeline.editTranslation(
             jobID: job.id,
             chunkIndex: 0,
-            translation: "第一夜【源文】",
-            settings: AppSettings(sourceLanguage: "日语", targetLanguage: "简体中文")
+            translation: editedTranslation,
+            settings: AppSettings(sourceLanguage: "English", targetLanguage: "简体中文")
         )
 
-        XCTAssertEqual(edited.chunks[0].finalTranslation, "第一夜【源文】")
+        XCTAssertEqual(edited.chunks[0].finalTranslation, editedTranslation)
         XCTAssertNil(edited.chunks[0].reviewScore)
         XCTAssertEqual(edited.chunks[0].attempts.count, 2)
         XCTAssertEqual(edited.chunks[0].attempts[0].review, historicalReview)
@@ -1067,6 +1070,7 @@ final class PlannerProviderSecurityAndDiaryTests: XCTestCase {
         XCTAssertTrue(manualAttempt.isManualEdit)
         XCTAssertNil(manualAttempt.review)
         XCTAssertTrue(manualAttempt.automaticChecks?.contains { $0.message == "译文含有提示词泄漏" } == true)
+        XCTAssertFalse(manualAttempt.automaticChecks?.contains { $0.message.contains("残留原文字符比例") } == true)
         let legacyManualAttempt = TranslationAttempt(translation: "旧编辑", review: TranslationReview(comment: "手动编辑", score: 100, modelReviewed: false))
         XCTAssertTrue(legacyManualAttempt.isManualEdit)
         XCTAssertTrue(transport.recordedRequests.isEmpty)

@@ -156,10 +156,14 @@ public struct TranslationPipeline: Sendable {
         guard var job = try await store.loadJob(id: jobID), let index = job.chunks.firstIndex(where: { $0.index == chunkIndex }) else { throw TranslationPipelineError.missingJob }
         let chunk = job.chunks[index]
         let guide = job.guide ?? TranslationGuide()
+        let configuredSourceLanguage = settings.sourceLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sourceLanguage = configuredSourceLanguage.caseInsensitiveCompare("auto") == .orderedSame
+            ? guide.sourceLanguage
+            : configuredSourceLanguage
         let report = TranslationQuality.inspect(
             source: chunk.source,
             translation: translation,
-            sourceLanguage: guide.sourceLanguage,
+            sourceLanguage: sourceLanguage,
             targetLanguage: settings.targetLanguage,
             glossary: PromptBuilder.relevantGlossary(in: chunk.source, guide: guide),
             previousTranslation: previousTranslation(for: chunk, in: job)

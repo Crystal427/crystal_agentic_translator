@@ -114,7 +114,7 @@ public enum TranslationQuality {
         let normalized = requested.lowercased()
         if normalized.contains("日") || normalized == "ja" { return .japanese }
         if normalized.contains("韩") || normalized == "ko" { return .korean }
-        if normalized.contains("英") || normalized == "en" { return .english }
+        if normalized.contains("英") || normalized == "en" || normalized.hasPrefix("en-") || normalized.contains("english") { return .english }
         let scalars = source.unicodeScalars
         let japanese = scalars.filter { (0x3040...0x30FF).contains(Int($0.value)) }.count
         let korean = scalars.filter { (0xAC00...0xD7AF).contains(Int($0.value)) }.count
