@@ -390,6 +390,11 @@ public struct TranslationChunk: Codable, Equatable, Identifiable, Sendable {
     public var rawText: String { leadingWhitespace + source + trailingWhitespace }
     public var latestAttempt: TranslationAttempt? { attempts.last }
     public var currentTranslation: String { finalTranslation.isEmpty ? (latestAttempt?.translation ?? "") : finalTranslation }
+
+    public func translation(forAttempt index: Int?) -> String {
+        guard let index, attempts.indices.contains(index) else { return currentTranslation }
+        return attempts[index].translation
+    }
 }
 
 public enum JobStatus: String, Codable, CaseIterable, Sendable {

@@ -426,7 +426,7 @@ private struct ChunkPreviewView: View {
                                     .frame(width: 130)
                                 }
                                 Button("重译") { revisionNote = ""; showingRetranslate = true }.disabled(model.isJobActive(job.id))
-                                Button("手动编辑") { editedText = chunk.currentTranslation; showingEditor = true }
+                                Button("手动编辑") { editedText = selectedTranslation(chunk); showingEditor = true }
                                     .buttonStyle(.borderedProminent)
                                     .disabled(model.isJobActive(job.id))
                             }
@@ -533,7 +533,7 @@ private struct ChunkPreviewView: View {
     }
 
     private func selectedTranslation(_ chunk: TranslationChunk) -> String {
-        selectedAttempt(chunk)?.translation ?? chunk.currentTranslation
+        chunk.translation(forAttempt: attemptNumber)
     }
 
     private func selectedAttempt(_ chunk: TranslationChunk) -> TranslationAttempt? {

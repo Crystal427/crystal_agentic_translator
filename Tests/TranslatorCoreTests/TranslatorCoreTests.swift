@@ -83,6 +83,9 @@ final class QualityAndPromptTests: XCTestCase {
 
         XCTAssertEqual(completed.currentTranslation, "通过的重译")
         XCTAssertEqual(inProgress.currentTranslation, "通过的重译")
+        XCTAssertEqual(completed.translation(forAttempt: nil), "通过的重译")
+        XCTAssertEqual(completed.translation(forAttempt: 0), "首次译文")
+        XCTAssertEqual(completed.translation(forAttempt: 20), "通过的重译")
     }
 
     func testDeterministicChecksFindEmptyLeakTermsAndParagraphMismatch() {
