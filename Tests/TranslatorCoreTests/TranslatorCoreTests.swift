@@ -453,7 +453,13 @@ final class PersistenceAndPipelineTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let alphabet = Array("甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥春夏秋冬山川江河天地风云星月日夜雨雪草木花鸟鱼虫")
         func variedText(_ count: Int, seed: Int) -> String {
-            String((0..<count).map { alphabet[($0 * 7 + $0 / 11 + seed) % alphabet.count] })
+            var characters: [Character] = []
+            characters.reserveCapacity(count)
+            for index in 0..<count {
+                let alphabetIndex: Int = (index * 7 + index / 11 + seed) % alphabet.count
+                characters.append(alphabet[alphabetIndex])
+            }
+            return String(characters)
         }
         let source = String(repeating: "Original passage. ", count: 180)
         let store = JobStore(rootURL: root)
