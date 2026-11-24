@@ -56,6 +56,18 @@ final class TextProcessingTests: XCTestCase {
 }
 
 final class QualityAndPromptTests: XCTestCase {
+    func testCurrentTranslationPrefersFinalOverAttemptHistory() {
+        let attempts = [
+            TranslationAttempt(translation: "首次译文"),
+            TranslationAttempt(translation: "通过的重译")
+        ]
+        let completed = TranslationChunk(index: 0, fileIndex: 0, fileName: "story.txt", source: "source", attempts: attempts, finalTranslation: "通过的重译")
+        let inProgress = TranslationChunk(index: 1, fileIndex: 0, fileName: "story.txt", source: "source", attempts: attempts)
+
+        XCTAssertEqual(completed.currentTranslation, "通过的重译")
+        XCTAssertEqual(inProgress.currentTranslation, "通过的重译")
+    }
+
     func testDeterministicChecksFindEmptyLeakTermsAndParagraphMismatch() {
         let glossary = [GlossaryEntry(source: "Fen", target: "老芬", category: "人名")]
         let empty = TranslationQuality.inspect(source: "Fen entered.", translation: "  ", sourceLanguage: "英语", glossary: glossary, previousTranslation: "")

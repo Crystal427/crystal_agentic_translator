@@ -383,7 +383,7 @@ private struct ChunkPreviewView: View {
     @State private var showingRetranslate = false
     @State private var editedText = ""
     @State private var revisionNote = ""
-    @State private var attemptNumber = 0
+    @State private var attemptNumber: Int?
 
     private var job: TranslationJob? { model.selectedJob }
     private var chunk: TranslationChunk? { job?.chunks.first { $0.index == model.selectedChunkIndex } }
@@ -419,13 +419,14 @@ private struct ChunkPreviewView: View {
                                 }
                                 Spacer()
                                 if !chunk.attempts.isEmpty {
-                                    Picker("尝试", selection: $attemptNumber) {
-                                        ForEach(chunk.attempts.indices, id: \.self) { index in Text("第\(index + 1)次").tag(index) }
+                                    Picker("译文", selection: $attemptNumber) {
+                                        Text("最终译文").tag(nil as Int?)
+                                        ForEach(chunk.attempts.indices, id: \.self) { index in Text("第\(index + 1)次").tag(Optional(index)) }
                                     }
                                     .frame(width: 130)
                                 }
                                 Button("重译") { revisionNote = ""; showingRetranslate = true }.disabled(model.isJobActive(job.id))
-                                Button("手动编辑") { editedText = selectedTranslation(chunk); showingEditor = true }
+                                Button("手动编辑") { editedText = chunk.currentTranslation; showingEditor = true }
                                     .buttonStyle(.borderedProminent)
                                     .disabled(model.isJobActive(job.id))
                             }
@@ -441,7 +442,7 @@ private struct ChunkPreviewView: View {
                         .padding(22)
                     }
                 }
-                .onChange(of: model.selectedChunkIndex) { _, _ in attemptNumber = 0 }
+                .onChange(of: model.selectedChunkIndex) { _, _ in attemptNumber = nil }
                 .sheet(isPresented: $showingEditor) {
                     EditTranslationSheet(text: $editedText) { Task { await model.editTranslation(chunkIndex: chunk.index, text: editedText) } }
                         .frame(minWidth: 650, minHeight: 520)
@@ -498,7 +499,7 @@ private struct ChunkPreviewView: View {
 
     @ViewBuilder
     private func reviewPanel(_ chunk: TranslationChunk) -> some View {
-        if let review = chunk.attempts.indices.contains(attemptNumber) ? chunk.attempts[attemptNumber].review : nil {
+        if let review = selectedAttempt(chunk)?.review {
             VStack(alignment: .leading, spacing: 12) {
                 HStack { Label("评审结果", systemImage: "checkmark.seal").font(.headline); Spacer(); Text("\(review.score)/100").font(.title3.weight(.semibold)); Text(review.verdict == "pass" ? "通过" : "需修改").font(.caption.weight(.semibold)).padding(.horizontal, 8).padding(.vertical, 4).background(review.verdict == "pass" ? Color.green.opacity(0.14) : Color.orange.opacity(0.16), in: Capsule()) }
                 HStack(spacing: 16) {
@@ -532,7 +533,14 @@ private struct ChunkPreviewView: View {
     }
 
     private func selectedTranslation(_ chunk: TranslationChunk) -> String {
-        chunk.attempts.indices.contains(attemptNumber) ? chunk.attempts[attemptNumber].translation : chunk.finalTranslation
+        selectedAttempt(chunk)?.translation ?? chunk.currentTranslation
+    }
+
+    private func selectedAttempt(_ chunk: TranslationChunk) -> TranslationAttempt? {
+        if let attemptNumber, chunk.attempts.indices.contains(attemptNumber) {
+            return chunk.attempts[attemptNumber]
+        }
+        return chunk.attempts.last { $0.translation == chunk.currentTranslation }
     }
 }
 
