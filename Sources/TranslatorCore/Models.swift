@@ -531,7 +531,12 @@ public struct TranslationAttempt: Codable, Equatable, Identifiable, Sendable {
     public var temperature: Double
     public var finishReason: String?
     public var createdAt: Date
-    public var isManualEdit: Bool { origin == .manualEdit || review?.comment == "手动编辑" }
+    public var isManualEdit: Bool {
+        guard let origin else {
+            return review?.modelReviewed == false && review?.comment == "手动编辑"
+        }
+        return origin == .manualEdit
+    }
 
     public init(id: UUID = UUID(), translation: String, review: TranslationReview? = nil, origin: TranslationAttemptOrigin? = .model, automaticChecks: [QualityFinding]? = nil, temperature: Double = 0, finishReason: String? = nil, createdAt: Date = .now) {
         self.id = id

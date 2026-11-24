@@ -464,6 +464,7 @@ final class PersistenceAndPipelineTests: XCTestCase {
         XCTAssertEqual(finished.chunks[0].attempts.first?.review?.score, 100)
         XCTAssertEqual(finished.chunks[0].attempts.first?.origin, .model)
         XCTAssertEqual(finished.chunks[0].attempts.first?.review?.modelReviewed, true)
+        XCTAssertFalse(finished.chunks[0].attempts.first?.isManualEdit ?? true)
         XCTAssertEqual(Set((finished.agentOutputSnapshots ?? []).map(\.role)), Set(["planner", "scout", "reviewer"]))
         XCTAssertTrue(finished.agentOutputSnapshots?.allSatisfy { !$0.rawJSON.isEmpty && !$0.structuredJSON.isEmpty } == true)
         let persistedJob = try await store.loadJob(id: finished.id)
@@ -1071,8 +1072,10 @@ final class PlannerProviderSecurityAndDiaryTests: XCTestCase {
         XCTAssertNil(manualAttempt.review)
         XCTAssertTrue(manualAttempt.automaticChecks?.contains { $0.message == "译文含有提示词泄漏" } == true)
         XCTAssertFalse(manualAttempt.automaticChecks?.contains { $0.message.contains("残留原文字符比例") } == true)
-        let legacyManualAttempt = TranslationAttempt(translation: "旧编辑", review: TranslationReview(comment: "手动编辑", score: 100, modelReviewed: false))
+        let legacyManualAttempt = TranslationAttempt(translation: "旧编辑", review: TranslationReview(comment: "手动编辑", score: 100, modelReviewed: false), origin: nil)
         XCTAssertTrue(legacyManualAttempt.isManualEdit)
+        let modelAttemptWithManualComment = TranslationAttempt(translation: "模型译文", review: TranslationReview(comment: "手动编辑", score: 90, modelReviewed: true), origin: .model)
+        XCTAssertFalse(modelAttemptWithManualComment.isManualEdit)
         XCTAssertTrue(transport.recordedRequests.isEmpty)
     }
 
