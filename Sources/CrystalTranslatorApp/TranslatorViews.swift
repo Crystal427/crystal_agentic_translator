@@ -4,6 +4,7 @@ import TranslatorCore
 
 struct TranslatorRootView: View {
     @Bindable var model: TranslatorAppModel
+    @Environment(\.openWindow) private var openWindow
     @State private var deleteJobID: UUID?
 
     var body: some View {
@@ -102,24 +103,53 @@ struct TranslatorRootView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        ToolbarItemGroup {
-            if let job = model.selectedJob {
-                if model.isWorking {
-                    Text(model.activeJob?.name ?? job.name).foregroundStyle(.secondary).lineLimit(1)
-                    Button { model.pause() } label: { Label("安全暂停", systemImage: "pause.fill") }
-                    if !model.isJobActive(job.id) {
-                        Button { model.enqueueJob(job.id) } label: { Label("加入队列", systemImage: "text.badge.plus") }
-                            .disabled(model.isJobQueued(job.id) || job.status == .completed)
+        if let job = model.selectedJob ?? model.activeJob {
+            ToolbarItem(placement: .principal) {
+                Text(model.isWorking ? model.activeJob?.name ?? job.name : job.name)
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: 260)
+            }
+        }
+        if model.isWorking {
+            ToolbarItem(placement: .primaryAction) {
+                Button { model.pause() } label: {
+                    Label("安全暂停", systemImage: "pause.fill").labelStyle(.iconOnly)
+                }
+                .help("安全暂停")
+            }
+            if let job = model.selectedJob, !model.isJobActive(job.id) {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { model.enqueueJob(job.id) } label: {
+                        Label("加入队列", systemImage: "text.badge.plus").labelStyle(.iconOnly)
                     }
-                } else if [.queued, .paused, .failed, .awaitingGuide].contains(job.status) {
-                    Text(job.name).foregroundStyle(.secondary).lineLimit(1)
-                    Button { model.startSelected() } label: { Label(job.status == .awaitingGuide ? "确认并继续" : "继续翻译", systemImage: "play.fill") }
-                        .disabled(job.status == .awaitingGuide && job.guide == nil)
+                    .disabled(model.isJobQueued(job.id) || job.status == .completed)
+                    .help("将所选任务加入队列")
                 }
             }
-            if model.hasQueuedJobs && !model.isWorking {
-                Button { model.runQueue() } label: { Label("运行队列", systemImage: "play.fill") }
+        } else if let job = model.selectedJob, [.queued, .paused, .failed, .awaitingGuide].contains(job.status) {
+            ToolbarItem(placement: .primaryAction) {
+                Button { model.startSelected() } label: {
+                    Label(job.status == .awaitingGuide ? "确认并继续" : "继续翻译", systemImage: "play.fill").labelStyle(.iconOnly)
+                }
+                .disabled(job.status == .awaitingGuide && job.guide == nil)
+                .help(job.status == .awaitingGuide ? "确认大纲并继续翻译" : "继续翻译")
             }
+        }
+        if model.hasQueuedJobs && !model.isWorking {
+            ToolbarItem(placement: .primaryAction) {
+                Button { model.runQueue() } label: {
+                    Label("运行队列", systemImage: "play.fill").labelStyle(.iconOnly)
+                }
+                .help("运行队列")
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button { openWindow(id: "compact-progress") } label: {
+                Label("任务速览", systemImage: "chart.bar.xaxis").labelStyle(.iconOnly)
+            }
+            .help("打开紧凑任务速览")
         }
     }
 }
@@ -326,36 +356,53 @@ private struct ProgressDashboard: View {
     private func livePanel(title: String, symbol: String, text: String, tint: Color) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Label(title, systemImage: symbol).font(.headline).foregroundStyle(tint)
-            ScrollView {
-                Text(text.isEmpty ? "等待模型输出…" : text)
-                    .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(text.isEmpty ? Color.secondary : Color.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
+            GeometryReader { geometry in
+                ScrollView(.vertical) {
+                    Text(text.isEmpty ? "等待模型输出…" : text)
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundStyle(text.isEmpty ? Color.secondary : Color.primary)
+                        .frame(width: max(0, geometry.size.width - 20), alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .padding(10)
+                }
+                .frame(width: geometry.size.width, height: geometry.size.height)
             }
-            .frame(height: 130)
-            .padding(10).background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+            .frame(minWidth: 0, maxWidth: .infinity)
+            .frame(height: 160)
+            .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
         }
-        .frame(maxWidth: .infinity, alignment: .leading).padding(15).cardSurface()
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).padding(15).cardSurface()
     }
 
     private var controllerPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("主控 Agent", systemImage: "brain.head.profile").font(.headline).foregroundStyle(.purple)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    if !model.controllerReasoning.isEmpty {
-                        Text(model.controllerReasoning).font(.system(.caption, design: .monospaced)).italic().foregroundStyle(.secondary)
+            GeometryReader { geometry in
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if !model.controllerReasoning.isEmpty {
+                            Text(model.controllerReasoning).font(.system(.caption, design: .monospaced)).italic().foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                        Text(model.controllerOutput.isEmpty ? "等待模型输出…" : model.controllerOutput)
+                            .font(.system(.callout, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
                     }
-                    Text(model.controllerOutput.isEmpty ? "等待模型输出…" : model.controllerOutput)
-                        .font(.system(.callout, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+                    .frame(width: max(0, geometry.size.width - 20), alignment: .leading)
+                    .padding(10)
                 }
+                .frame(width: geometry.size.width, height: geometry.size.height)
             }
-            .frame(height: 130).padding(10).background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+            .frame(minWidth: 0, maxWidth: .infinity)
+            .frame(height: 160)
+            .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
         }
-        .frame(maxWidth: .infinity, alignment: .leading).padding(15).cardSurface()
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).padding(15).cardSurface()
     }
 
     private func duration(_ seconds: TimeInterval) -> String {
@@ -374,6 +421,122 @@ private struct ProgressDashboard: View {
         let elapsed = Date.now.timeIntervalSince(job.startedAt ?? job.createdAt)
         let estimate = elapsed / Double(job.completedCount) * Double(job.chunks.count - job.completedCount)
         return duration(estimate)
+    }
+}
+
+struct CompactProgressWindow: View {
+    @Bindable var model: TranslatorAppModel
+    @Environment(\.openWindow) private var openWindow
+    @State private var isHovered = false
+
+    private var job: TranslationJob? { model.activeJob ?? model.selectedJob }
+    private var gridColumns: [GridItem] { Array(repeating: GridItem(.flexible(minimum: 8), spacing: 4), count: 16) }
+
+    var body: some View {
+        ZStack {
+            if let job {
+                progressCard(job)
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "chart.bar.xaxis").font(.title2).foregroundStyle(.secondary)
+                    Text("选择一个翻译任务查看进度").font(.callout).foregroundStyle(.secondary)
+                }
+                .frame(width: 360, height: 210)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary.opacity(0.55), lineWidth: 1))
+                .scaleEffect(isHovered ? 1.1 : 1)
+            }
+        }
+        .frame(width: 412, height: 252)
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .animation(.easeInOut(duration: 0.18), value: isHovered)
+    }
+
+    private func progressCard(_ job: TranslationJob) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(job.name).font(.headline).lineLimit(1)
+                    Text("\(activityLabel(for: job)) · \(job.completedCount)/\(job.chunks.count) 段")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Text("\(completionPercentage(job))%")
+                    .font(.title3.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+
+            if job.chunks.isEmpty {
+                Text("尚无片段").font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 62)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: gridColumns, spacing: 4) {
+                        ForEach(job.chunks) { chunk in
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(chunkColor(chunk))
+                                .frame(height: 12)
+                                .help("第 \(chunk.index + 1) 段 · \(chunk.status.rawValue) · \(chunk.reviewScore.map(String.init) ?? "未评分")")
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .scrollIndicators(.hidden)
+                .frame(height: 62)
+            }
+
+            HStack(spacing: 8) {
+                if model.isJobActive(job.id) {
+                    Button { model.pause() } label: { Label("暂停", systemImage: "pause.fill") }
+                        .help("安全暂停当前任务")
+                } else {
+                    Button {
+                        model.selectedJobID = job.id
+                        model.enqueueJob(job.id)
+                    } label: {
+                        Label(model.isJobQueued(job.id) ? "排队中" : "继续", systemImage: model.isJobQueued(job.id) ? "checkmark" : "play.fill")
+                    }
+                    .disabled(model.isJobQueued(job.id) || job.status == .completed || (job.status == .awaitingGuide && job.guide == nil))
+                }
+                if model.hasQueuedJobs && !model.isWorking {
+                    Button { model.runQueue() } label: { Label("运行队列", systemImage: "play.fill") }
+                }
+                Spacer(minLength: 0)
+                Button {
+                    model.selectedJobID = job.id
+                    model.page = .progress
+                    openWindow(id: "translator-main")
+                } label: {
+                    Label("查看任务", systemImage: "arrow.up.right.square")
+                }
+                .help("在主窗口打开任务进度")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(12)
+        .frame(width: 360, height: 210, alignment: .topLeading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary.opacity(0.55), lineWidth: 1))
+        .scaleEffect(isHovered ? 1.1 : 1)
+    }
+
+    private func activityLabel(for job: TranslationJob) -> String {
+        let activity = model.activityText(for: job.id, fallback: job.status.rawValue)
+        if model.isJobActive(job.id), !activity.isEmpty { return activity }
+        if model.isJobQueued(job.id) { return "队列中" }
+        return activity
+    }
+
+    private func completionPercentage(_ job: TranslationJob) -> Int {
+        guard !job.chunks.isEmpty else { return 0 }
+        return Int(Double(job.completedCount) / Double(job.chunks.count) * 100)
+    }
+
+    private func chunkColor(_ chunk: TranslationChunk) -> Color {
+        guard chunk.status == .done, let score = chunk.reviewScore else { return statusColor(chunk.status) }
+        return score < 60 ? .red : score < 80 ? .orange : .green
     }
 }
 

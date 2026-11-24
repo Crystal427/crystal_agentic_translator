@@ -72,6 +72,35 @@ final class TextProcessingTests: XCTestCase {
     }
 }
 
+final class JobModelOutputCacheTests: XCTestCase {
+    func testModelOutputIsRetainedPerJobAndResetPerAgent() {
+        let firstJobID = UUID()
+        let secondJobID = UUID()
+        var cache = JobModelOutputCache()
+
+        cache.begin(jobID: firstJobID, role: "主控")
+        cache.append(jobID: firstJobID, role: "主控", kind: "reasoning", text: "推理")
+        cache.append(jobID: firstJobID, role: "主控", kind: "content", text: "大纲")
+        cache.begin(jobID: firstJobID, role: "翻译模型")
+        cache.append(jobID: firstJobID, role: "翻译模型", kind: "content", text: "译文 A")
+        cache.setActivity(jobID: firstJobID, text: "翻译第 1 段")
+        cache.begin(jobID: secondJobID, role: "翻译模型")
+        cache.append(jobID: secondJobID, role: "翻译模型", kind: "content", text: "译文 B")
+        cache.setActivity(jobID: secondJobID, text: "评审第 2 段")
+
+        XCTAssertEqual(cache.output(for: firstJobID), JobModelOutput(activity: "翻译第 1 段", controllerReasoning: "推理", controllerOutput: "大纲", translator: "译文 A"))
+        XCTAssertEqual(cache.output(for: secondJobID), JobModelOutput(activity: "评审第 2 段", translator: "译文 B"))
+        XCTAssertEqual(cache.activity(for: firstJobID, fallback: "已完成"), "翻译第 1 段")
+        XCTAssertEqual(cache.activity(for: secondJobID, fallback: "已完成"), "评审第 2 段")
+
+        cache.begin(jobID: firstJobID, role: "主控")
+        XCTAssertEqual(cache.output(for: firstJobID), JobModelOutput(activity: "翻译第 1 段", translator: "译文 A"))
+        cache.remove(jobID: firstJobID)
+        XCTAssertEqual(cache.output(for: firstJobID), JobModelOutput())
+        XCTAssertEqual(cache.activity(for: firstJobID, fallback: "已完成"), "已完成")
+    }
+}
+
 final class QualityAndPromptTests: XCTestCase {
     func testCurrentTranslationPrefersFinalOverAttemptHistory() {
         let attempts = [

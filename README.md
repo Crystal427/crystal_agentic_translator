@@ -33,7 +33,7 @@ The script also creates `dist/CrystalTranslator-macOS.zip`. To choose a differen
 
 ## Queue and activity
 
-Tasks explicitly added to the run queue execute serially in FIFO order. A normal completion drains the queue; a user pause stops the drain and leaves remaining jobs queued until **Run Queue** is explicitly selected. Jobs awaiting guide confirmation are not silently restarted. Queue order is held in memory and does not survive relaunch. Job data and per-job `events.log` files are persisted; selecting a job reloads its log, while live activity and model streams are scoped to the selected job.
+Tasks explicitly added to the run queue execute serially in FIFO order. A normal completion drains the queue; a user pause stops the drain and leaves remaining jobs queued until **Run Queue** is explicitly selected. Jobs awaiting guide confirmation are not silently restarted. Queue order is held in memory and does not survive relaunch. Job data and per-job `events.log` files are persisted; selecting a job reloads its log and its own latest activity/output is retained in memory for the current app session. After relaunch, the compact window falls back to the persisted job status until new live activity arrives. The main app uses one reusable window; the compact window can reopen it after it is closed.
 
 Text normalization preserves source content after normalizing line endings, removing trailing line whitespace, and compressing runs of four or more blank lines to three. UTF-8/UTF-16 BOMs are honored; UTF-8, GB18030, Shift-JIS, and Windows-1252 are fallback decoders. New-task chunk size defaults to 8,192 characters.
 

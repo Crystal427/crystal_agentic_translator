@@ -4,9 +4,10 @@ import TranslatorCore
 @main
 struct CrystalTranslatorApp: App {
     @State private var model = TranslatorAppModel()
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        WindowGroup {
+        Window("Crystal Translator", id: "translator-main") {
             TranslatorRootView(model: model)
                 .frame(minWidth: 1_050, minHeight: 700)
                 .task { await model.load() }
@@ -14,10 +15,20 @@ struct CrystalTranslatorApp: App {
         .windowStyle(.titleBar)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("新建翻译任务…") { model.page = .newJob }
+                Button("新建翻译任务…") {
+                    model.page = .newJob
+                    openWindow(id: "translator-main")
+                }
                     .keyboardShortcut("n", modifiers: .command)
             }
         }
+        Window("任务速览", id: "compact-progress") {
+            CompactProgressWindow(model: model)
+                .task { await model.load() }
+        }
+        .windowStyle(.titleBar)
+        .windowResizability(.contentSize)
+        .defaultSize(width: 412, height: 252)
         Settings {
             SettingsView(model: model)
         }
@@ -62,9 +73,7 @@ final class TranslatorAppModel {
     var jobQueue = SerialJobQueue()
     private(set) var hasLoaded = false
     var currentActivity = "等待操作"
-    var controllerReasoning = ""
-    var controllerOutput = ""
-    var translatorStream = ""
+    var modelOutputCache = JobModelOutputCache()
     var logLines: [String] = []
     private var displayedLogJobID: UUID?
     var errorMessage: String?
@@ -76,6 +85,12 @@ final class TranslatorAppModel {
 
     var selectedJob: TranslationJob? { jobs.first { $0.id == selectedJobID } }
     var activeJob: TranslationJob? { activityGuard.activeJobID.flatMap { id in jobs.first { $0.id == id } } }
+    var controllerReasoning: String { modelOutputCache.output(for: selectedJobID).controllerReasoning }
+    var controllerOutput: String { modelOutputCache.output(for: selectedJobID).controllerOutput }
+    var translatorStream: String { modelOutputCache.output(for: selectedJobID).translator }
+    func activityText(for jobID: UUID, fallback: String) -> String {
+        modelOutputCache.activity(for: jobID, fallback: fallback)
+    }
     func isJobActive(_ id: UUID) -> Bool { activityGuard.activeJobID == id }
     func isJobQueued(_ id: UUID) -> Bool { jobQueue.contains(id) }
     var hasQueuedJobs: Bool { !jobQueue.isEmpty }
@@ -111,14 +126,9 @@ final class TranslatorAppModel {
         let liveLines = displayedLogJobID == jobID ? logLines : []
         if displayedLogJobID != jobID {
             logLines = []
-            currentActivity = selectedJob?.status.rawValue ?? "等待操作"
+            currentActivity = activityText(for: jobID, fallback: selectedJob?.status.rawValue ?? "等待操作")
         }
         displayedLogJobID = jobID
-        if activityGuard.activeJobID != jobID {
-            controllerReasoning = ""
-            controllerOutput = ""
-            translatorStream = ""
-        }
         do {
             let persisted = try await store.loadLog(jobID: jobID)
             guard selectedJobID == jobID else { return }
@@ -204,10 +214,7 @@ final class TranslatorAppModel {
             guard let self else { return }
             while !Task.isCancelled, let jobID = self.jobQueue.dequeue() {
                 guard self.activityGuard.begin(jobID) else { continue }
-                self.currentActivity = "正在启动…"
-                self.controllerReasoning = ""
-                self.controllerOutput = ""
-                self.translatorStream = ""
+                self.updateActivity(jobID: jobID, message: "正在启动…")
                 let pipeline = self.makePipeline()
                 var shouldStopQueue = false
                 do {
@@ -229,7 +236,11 @@ final class TranslatorAppModel {
 
     func pause() {
         worker?.cancel()
-        currentActivity = "正在安全暂停…"
+        if let jobID = activityGuard.activeJobID {
+            updateActivity(jobID: jobID, message: "正在安全暂停…")
+        } else {
+            currentActivity = "正在安全暂停…"
+        }
     }
 
     func resumeAfterGuide() {
@@ -242,6 +253,7 @@ final class TranslatorAppModel {
         do {
             _ = jobQueue.remove(selectedJobID)
             try await store.deleteJob(id: selectedJobID)
+            modelOutputCache.remove(jobID: selectedJobID)
             await refresh()
         } catch { errorMessage = error.localizedDescription }
     }
@@ -283,6 +295,11 @@ final class TranslatorAppModel {
         LMStudioClient(baseURL: settings.baseURL, apiToken: settings.apiToken)
     }
 
+    private func updateActivity(jobID: UUID, message: String) {
+        modelOutputCache.setActivity(jobID: jobID, text: message)
+        if selectedJobID == jobID { currentActivity = message }
+    }
+
     private func makePipeline() -> TranslationPipeline {
         TranslationPipeline(store: store, client: client())
     }
@@ -290,19 +307,12 @@ final class TranslatorAppModel {
     private func consume(_ event: PipelineEvent) {
         switch event {
         case .status(let jobID, let message):
-            guard selectedJobID == jobID else { return }
-            currentActivity = message
+            updateActivity(jobID: jobID, message: message)
         case .activity(let jobID, let role, let action):
-            guard selectedJobID == jobID else { return }
-            currentActivity = "\(role)：\(action)"
-            if role == "主控" { controllerReasoning = ""; controllerOutput = "" } else { translatorStream = "" }
+            updateActivity(jobID: jobID, message: "\(role)：\(action)")
+            modelOutputCache.begin(jobID: jobID, role: role)
         case .stream(let jobID, let role, let kind, let text):
-            guard selectedJobID == jobID else { return }
-            if role == "主控" {
-                if kind == "reasoning" { controllerReasoning += text } else { controllerOutput += text }
-            } else {
-                translatorStream += text
-            }
+            modelOutputCache.append(jobID: jobID, role: role, kind: kind, text: text)
         case .chunk(_, _):
             Task { await refresh() }
         case .log(let jobID, let message):
