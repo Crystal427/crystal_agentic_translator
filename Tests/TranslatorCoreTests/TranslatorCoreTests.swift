@@ -473,6 +473,36 @@ final class PersistenceAndPipelineTests: XCTestCase {
         XCTAssertNoThrow(try JSONDecoder().decode(TranslationGuide.self, from: Data("{}".utf8)))
     }
 
+    func testInitialPlannerPersistsOnlySectionsWithKnownIDsAndExactEvidence() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = JobStore(rootURL: root)
+        let transport = MockLMStudioTransport()
+        let settings = AppSettings(controllerModel: "controller", translatorModel: "translator", pauseAfterOverview: true)
+        let pipeline = TranslationPipeline(store: store, client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: transport))
+        let source = "第一夜\n主人公は目を覚ます。\n"
+        let job = try await pipeline.createJob(name: "Section validation", sources: [SourceDocument(name: "story.txt", text: source)], series: false, settings: settings)
+        let knownID = try XCTUnwrap(job.sections?.first?.id)
+        let response = TranslationGuide(
+            titleZh: "测试作品",
+            sourceLanguage: "日语",
+            genre: "小说",
+            synopsis: "主人公醒来。",
+            style: TranslationStyle(narration: "第一人称", tone: "平实", diction: "自然", dialogue: "口语", punctuation: "中文标点"),
+            rules: ["忠实原文", "术语一致", "保留段落"],
+            sections: [
+                SectionInsight(sectionID: "unknown-section", sourceTitle: "错误", sectionType: "篇章", summary: "错误 ID", evidence: "第一夜"),
+                SectionInsight(sectionID: knownID, sourceTitle: "第一夜", sectionType: "篇章", summary: "错误证据", evidence: "原文没有这句话。"),
+                SectionInsight(sectionID: knownID, sourceTitle: "第一夜", sectionType: "独立篇章", summary: "主人公在夜间醒来。", evidence: "第一夜")
+            ]
+        )
+        transport.enqueueChatResponses([String(decoding: try JSONEncoder().encode(response), as: UTF8.self)])
+
+        let planned = try await pipeline.run(jobID: job.id, settings: settings)
+
+        XCTAssertEqual(planned.guide?.sections, [SectionInsight(sectionID: knownID, sourceTitle: "第一夜", sectionType: "独立篇章", summary: "主人公在夜间醒来。", evidence: "第一夜")])
+    }
+
     func testResumedTranslatedChunkIsReviewedWithoutRetranslating() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

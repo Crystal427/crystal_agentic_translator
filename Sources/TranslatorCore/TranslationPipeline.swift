@@ -614,6 +614,7 @@ public struct TranslationPipeline: Sendable {
 
     private func mergeGuide(existing: TranslationGuide?, update: TranslationGuide, source: String, sectionIDs: Set<String>) -> TranslationGuide {
         var result = existing ?? update
+        if existing == nil { result.sections = [] }
         result.titleZh = firstNonempty(result.titleZh, update.titleZh)
         result.sourceLanguage = firstNonempty(result.sourceLanguage, update.sourceLanguage)
         result.genre = update.genre.isEmpty ? result.genre : update.genre
