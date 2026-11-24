@@ -108,6 +108,18 @@ final class TextProcessingTests: XCTestCase {
         XCTAssertEqual(secondNightChunk.leadingWhitespace, "\n\n\n")
     }
 
+    func testShortTailRebalanceUsesSafeBoundaryAndKeepsNamedTermTogether() {
+        let namedTerm = "竜王記憶の鍵"
+        let sentence = String(repeating: "甲", count: 120) + "。" + String(repeating: "乙", count: 24) + namedTerm + String(repeating: "丙", count: 105)
+        let source = sentence + String(repeating: "後", count: 45)
+        let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "named-term.txt", text: source, maxCharacters: 256, contextCharacters: 0)
+
+        XCTAssertEqual(chunks.map(\.rawText).joined(), source)
+        XCTAssertEqual(chunks.map(\.source.count), [121, 180])
+        XCTAssertEqual(chunks.first?.source, String(repeating: "甲", count: 120) + "。")
+        XCTAssertTrue(chunks.contains { $0.source.contains(namedTerm) })
+    }
+
     func testZeroChunkContextIsEmptyOnBothSides() {
         let source = String(repeating: "a", count: 600)
         let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "context.txt", text: source, maxCharacters: 256, contextCharacters: 0)
