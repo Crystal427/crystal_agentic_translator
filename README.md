@@ -52,7 +52,7 @@ Settings and resumable projects are stored in:
     guide.md
     memory.md
     memory/<chunk-index>.md
-    output/<source-name>.zh.txt
+    output/<file-index>-<source-name>.zh.txt
     events.log
 ```
 

@@ -73,7 +73,9 @@ public actor JobStore {
         for (index, file) in job.sourceFiles.enumerated() {
             let output = mergedOutput(for: job, fileIndex: index)
             let base = URL(fileURLWithPath: file.name).deletingPathExtension().lastPathComponent
-            try write(Data(output.utf8), to: directory.appendingPathComponent("output").appendingPathComponent("\(base).zh.txt"))
+            let safeBase = String(base.filter { $0.isLetter || $0.isNumber || " .-_".contains($0) }.prefix(100))
+            let outputName = String(format: "%02d-%@.zh.txt", index + 1, safeBase.isEmpty ? "source" : safeBase)
+            try write(Data(output.utf8), to: directory.appendingPathComponent("output").appendingPathComponent(outputName))
         }
     }
 

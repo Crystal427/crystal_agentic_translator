@@ -274,6 +274,27 @@ final class PersistenceAndPipelineTests: XCTestCase {
         XCTAssertEqual(latest, "最新译文")
     }
 
+    func testSameBasenameSourcesKeepSeparateOutputArtifacts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = JobStore(rootURL: root)
+        let first = TranslationChunk(index: 0, fileIndex: 0, fileName: "chapter.txt", source: "first", status: .done, finalTranslation: "第一份译文")
+        let second = TranslationChunk(index: 1, fileIndex: 1, fileName: "chapter.txt", source: "second", status: .done, finalTranslation: "第二份译文")
+        let job = TranslationJob(name: "Duplicate basenames", series: true, sourceFiles: [
+            SourceDocument(name: "chapter.txt", text: "first source"),
+            SourceDocument(name: "chapter.txt", text: "second source")
+        ], chunks: [first, second])
+
+        try await store.save(job)
+
+        let outputDirectory = root.appendingPathComponent("jobs/\(job.id.uuidString)/output", isDirectory: true)
+        let outputFiles = try FileManager.default.contentsOfDirectory(at: outputDirectory, includingPropertiesForKeys: nil).sorted { $0.lastPathComponent < $1.lastPathComponent }
+        XCTAssertEqual(outputFiles.count, 2)
+        XCTAssertEqual(outputFiles.map(\.lastPathComponent), ["01-chapter.zh.txt", "02-chapter.zh.txt"])
+        let contents = try outputFiles.map { try String(contentsOf: $0, encoding: .utf8) }
+        XCTAssertEqual(contents, ["第一份译文", "第二份译文"])
+    }
+
     func testPipelineRunsPlannerScoutTranslatorReviewerAndPersistsCompletion() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
