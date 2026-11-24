@@ -462,6 +462,8 @@ final class PersistenceAndPipelineTests: XCTestCase {
         XCTAssertEqual(finished.completedCount, 1)
         XCTAssertEqual(finished.chunks[0].finalTranslation, "你好。")
         XCTAssertEqual(finished.chunks[0].attempts.first?.review?.score, 100)
+        XCTAssertEqual(finished.chunks[0].attempts.first?.origin, .model)
+        XCTAssertEqual(finished.chunks[0].attempts.first?.review?.modelReviewed, true)
         XCTAssertEqual(Set((finished.agentOutputSnapshots ?? []).map(\.role)), Set(["planner", "scout", "reviewer"]))
         XCTAssertTrue(finished.agentOutputSnapshots?.allSatisfy { !$0.rawJSON.isEmpty && !$0.structuredJSON.isEmpty } == true)
         let persistedJob = try await store.loadJob(id: finished.id)
@@ -1036,11 +1038,37 @@ final class PlannerProviderSecurityAndDiaryTests: XCTestCase {
         let store = JobStore(rootURL: root)
         let transport = MockLMStudioTransport()
         let pipeline = TranslationPipeline(store: store, client: LMStudioClient(baseURL: "not a url", provider: .glmCodingPlan, transport: transport))
-        let job = try await pipeline.createJob(name: "Offline edits", sources: [SourceDocument(name: "story.txt", text: "第一夜")], series: false, settings: AppSettings())
+        var job = try await pipeline.createJob(name: "Offline edits", sources: [SourceDocument(name: "story.txt", text: "第一夜")], series: false, settings: AppSettings())
+        let historicalReview = TranslationReview(
+            scores: ReviewScores(accuracy: 9, completeness: 9, terminology: 8, fluency: 9, style: 9),
+            verdict: "pass",
+            comment: "历史模型评审",
+            score: 90,
+            modelReviewed: true
+        )
+        job.chunks[0].attempts = [TranslationAttempt(translation: "先前译文", review: historicalReview)]
+        job.chunks[0].finalTranslation = "先前译文"
+        job.chunks[0].reviewScore = historicalReview.score
+        try await store.save(job)
         _ = try await pipeline.updateGuide(jobID: job.id, guide: TranslationGuide(titleZh: "梦十夜"))
-        let edited = try await pipeline.editTranslation(jobID: job.id, chunkIndex: 0, translation: "第一夜")
+        let edited = try await pipeline.editTranslation(
+            jobID: job.id,
+            chunkIndex: 0,
+            translation: "第一夜【源文】",
+            settings: AppSettings(sourceLanguage: "日语", targetLanguage: "简体中文")
+        )
 
-        XCTAssertEqual(edited.chunks[0].finalTranslation, "第一夜")
+        XCTAssertEqual(edited.chunks[0].finalTranslation, "第一夜【源文】")
+        XCTAssertNil(edited.chunks[0].reviewScore)
+        XCTAssertEqual(edited.chunks[0].attempts.count, 2)
+        XCTAssertEqual(edited.chunks[0].attempts[0].review, historicalReview)
+        let manualAttempt = try XCTUnwrap(edited.chunks[0].attempts.last)
+        XCTAssertEqual(manualAttempt.origin, .manualEdit)
+        XCTAssertTrue(manualAttempt.isManualEdit)
+        XCTAssertNil(manualAttempt.review)
+        XCTAssertTrue(manualAttempt.automaticChecks?.contains { $0.message == "译文含有提示词泄漏" } == true)
+        let legacyManualAttempt = TranslationAttempt(translation: "旧编辑", review: TranslationReview(comment: "手动编辑", score: 100, modelReviewed: false))
+        XCTAssertTrue(legacyManualAttempt.isManualEdit)
         XCTAssertTrue(transport.recordedRequests.isEmpty)
     }
 

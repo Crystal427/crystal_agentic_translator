@@ -517,18 +517,28 @@ public struct QualityFinding: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public enum TranslationAttemptOrigin: String, Codable, Equatable, Sendable {
+    case model
+    case manualEdit = "manual_edit"
+}
+
 public struct TranslationAttempt: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     public var translation: String
     public var review: TranslationReview?
+    public var origin: TranslationAttemptOrigin?
+    public var automaticChecks: [QualityFinding]?
     public var temperature: Double
     public var finishReason: String?
     public var createdAt: Date
+    public var isManualEdit: Bool { origin == .manualEdit || review?.comment == "手动编辑" }
 
-    public init(id: UUID = UUID(), translation: String, review: TranslationReview? = nil, temperature: Double = 0, finishReason: String? = nil, createdAt: Date = .now) {
+    public init(id: UUID = UUID(), translation: String, review: TranslationReview? = nil, origin: TranslationAttemptOrigin? = .model, automaticChecks: [QualityFinding]? = nil, temperature: Double = 0, finishReason: String? = nil, createdAt: Date = .now) {
         self.id = id
         self.translation = translation
         self.review = review
+        self.origin = origin
+        self.automaticChecks = automaticChecks
         self.temperature = temperature
         self.finishReason = finishReason
         self.createdAt = createdAt

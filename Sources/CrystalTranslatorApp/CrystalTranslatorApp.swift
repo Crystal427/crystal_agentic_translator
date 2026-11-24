@@ -341,7 +341,7 @@ final class TranslatorAppModel {
         guard let selectedJobID else { return }
         guard activityGuard.canMutate(selectedJobID) else { errorMessage = "当前任务运行中，暂停并等待停止后再编辑译文。"; return }
         do {
-            _ = try await makePipeline(requiringCredentials: false).editTranslation(jobID: selectedJobID, chunkIndex: chunkIndex, translation: text)
+            _ = try await makePipeline(requiringCredentials: false).editTranslation(jobID: selectedJobID, chunkIndex: chunkIndex, translation: text, settings: settings)
             await refresh()
         } catch {
             errorMessage = WorkspaceDiaryStore.redact(error.localizedDescription)

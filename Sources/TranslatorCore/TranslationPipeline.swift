@@ -152,14 +152,23 @@ public struct TranslationPipeline: Sendable {
         return job
     }
 
-    public func editTranslation(jobID: UUID, chunkIndex: Int, translation: String) async throws -> TranslationJob {
+    public func editTranslation(jobID: UUID, chunkIndex: Int, translation: String, settings: AppSettings = AppSettings()) async throws -> TranslationJob {
         guard var job = try await store.loadJob(id: jobID), let index = job.chunks.firstIndex(where: { $0.index == chunkIndex }) else { throw TranslationPipelineError.missingJob }
-        var attempt = TranslationAttempt(translation: translation, temperature: 0)
-        attempt.review = TranslationReview(verdict: "pass", comment: "手动编辑", score: 100, modelReviewed: false)
+        let chunk = job.chunks[index]
+        let guide = job.guide ?? TranslationGuide()
+        let report = TranslationQuality.inspect(
+            source: chunk.source,
+            translation: translation,
+            sourceLanguage: guide.sourceLanguage,
+            targetLanguage: settings.targetLanguage,
+            glossary: PromptBuilder.relevantGlossary(in: chunk.source, guide: guide),
+            previousTranslation: previousTranslation(for: chunk, in: job)
+        )
+        let attempt = TranslationAttempt(translation: translation, origin: .manualEdit, automaticChecks: report.findings, temperature: 0)
         job.chunks[index].attempts.append(attempt)
         job.chunks[index].explicitRetryPending = nil
         job.chunks[index].finalTranslation = translation
-        job.chunks[index].reviewScore = 100
+        job.chunks[index].reviewScore = nil
         job.chunks[index].needsHumanReview = false
         job.chunks[index].status = .done
         job.updatedAt = .now

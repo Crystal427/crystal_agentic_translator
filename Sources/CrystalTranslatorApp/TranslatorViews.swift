@@ -795,32 +795,61 @@ private struct ChunkPreviewView: View {
 
     @ViewBuilder
     private func reviewPanel(_ chunk: TranslationChunk) -> some View {
-        if let review = selectedAttempt(chunk)?.review {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack { Label("评审结果", systemImage: "checkmark.seal").font(.headline); Spacer(); Text("\(review.score)/100").font(.title3.weight(.semibold)); Text(review.verdict == "pass" ? "通过" : "需修改").font(.caption.weight(.semibold)).padding(.horizontal, 8).padding(.vertical, 4).background(review.verdict == "pass" ? Color.green.opacity(0.14) : Color.orange.opacity(0.16), in: Capsule()) }
-                HStack(spacing: 16) {
-                    score("忠实度", review.scores.accuracy); score("完整度", review.scores.completeness); score("术语", review.scores.terminology); score("流畅度", review.scores.fluency); score("风格", review.scores.style)
-                }
-                Text(review.comment).foregroundStyle(.secondary)
-                ForEach(review.issues) { issue in
-                    HStack(alignment: .top, spacing: 8) {
-                        Text(issue.severity).font(.caption2.weight(.bold)).foregroundStyle(issue.severity == "严重" ? .red : .orange)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("\(issue.type)：\(issue.source)").font(.callout.weight(.medium))
-                            if !issue.translation.isEmpty { Text(issue.translation).foregroundStyle(.secondary) }
-                            Text(issue.suggestion).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }.padding(8).background(.background, in: RoundedRectangle(cornerRadius: 7))
-                }
-                if !review.automaticChecks.isEmpty {
-                    Divider()
-                    ForEach(review.automaticChecks) { finding in
-                        Label(finding.message, systemImage: finding.hard ? "exclamationmark.triangle.fill" : "info.circle")
-                            .font(.caption).foregroundStyle(finding.hard ? .red : .secondary)
+        if let attempt = selectedAttempt(chunk) {
+            if attempt.isManualEdit {
+                qualityOnlyPanel(
+                    title: "手动编辑 · 未经模型评审",
+                    findings: attempt.automaticChecks ?? [],
+                    findingsWereRecorded: attempt.automaticChecks != nil
+                )
+            } else if let review = attempt.review, review.modelReviewed {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack { Label("模型评审结果", systemImage: "checkmark.seal").font(.headline); Spacer(); Text("\(review.score)/100").font(.title3.weight(.semibold)); Text(review.verdict == "pass" ? "通过" : "需修改").font(.caption.weight(.semibold)).padding(.horizontal, 8).padding(.vertical, 4).background(review.verdict == "pass" ? Color.green.opacity(0.14) : Color.orange.opacity(0.16), in: Capsule()) }
+                    HStack(spacing: 16) {
+                        score("忠实度", review.scores.accuracy); score("完整度", review.scores.completeness); score("术语", review.scores.terminology); score("流畅度", review.scores.fluency); score("风格", review.scores.style)
                     }
-                }
-                if !review.modelReviewed { Label("本次采用自动质检降级评分，未经模型评审", systemImage: "info.circle").font(.caption).foregroundStyle(.orange) }
-            }.padding(14).cardSurface()
+                    Text(review.comment).foregroundStyle(.secondary)
+                    ForEach(review.issues) { issue in
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(issue.severity).font(.caption2.weight(.bold)).foregroundStyle(issue.severity == "严重" ? .red : .orange)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(issue.type)：\(issue.source)").font(.callout.weight(.medium))
+                                if !issue.translation.isEmpty { Text(issue.translation).foregroundStyle(.secondary) }
+                                Text(issue.suggestion).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }.padding(8).background(.background, in: RoundedRectangle(cornerRadius: 7))
+                    }
+                    qualityFindings(review.automaticChecks)
+                }.padding(14).cardSurface()
+            } else if let review = attempt.review {
+                qualityOnlyPanel(title: "仅自动质检 · 未经模型评审", findings: review.automaticChecks)
+            }
+        }
+    }
+
+    private func qualityOnlyPanel(title: String, findings: [QualityFinding], findingsWereRecorded: Bool = true) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: "checkmark.shield").font(.headline)
+            if findingsWereRecorded {
+                qualityFindings(findings, showEmptyState: true)
+            } else {
+                Label("该历史手动编辑未记录自动质检结果", systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
+            }
+        }.padding(14).cardSurface()
+    }
+
+    @ViewBuilder
+    private func qualityFindings(_ findings: [QualityFinding], showEmptyState: Bool = false) -> some View {
+        if findings.isEmpty {
+            if showEmptyState {
+                Label("自动质检未发现问题", systemImage: "checkmark.circle").font(.caption).foregroundStyle(.secondary)
+            }
+        } else {
+            Divider()
+            ForEach(findings) { finding in
+                Label(finding.message, systemImage: finding.hard ? "exclamationmark.triangle.fill" : "info.circle")
+                    .font(.caption).foregroundStyle(finding.hard ? .red : .secondary)
+            }
         }
     }
 
