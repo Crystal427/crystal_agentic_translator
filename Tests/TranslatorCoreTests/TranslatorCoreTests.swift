@@ -442,6 +442,37 @@ final class PersistenceAndPipelineTests: XCTestCase {
         XCTAssertEqual(plannerCalls.count, 2)
     }
 
+    func testPlannerRetriesSemanticallyEmptyGuideBeforeCheckpoint() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let validGuide = TranslationGuide(
+            titleZh: "测试作品",
+            sourceLanguage: "日语",
+            genre: "小说",
+            synopsis: "主人公开始一段旅程。",
+            style: TranslationStyle(narration: "第一人称", tone: "平实", diction: "自然", dialogue: "口语", punctuation: "中文标点"),
+            rules: ["忠实原文", "术语一致", "保留段落"]
+        )
+        let validJSON = String(decoding: try JSONEncoder().encode(validGuide), as: UTF8.self)
+        let transport = MockLMStudioTransport(chatResponses: ["{}", validJSON])
+        let settings = AppSettings(controllerModel: "controller", translatorModel: "translator", pauseAfterOverview: true)
+        let pipeline = TranslationPipeline(store: JobStore(rootURL: root), client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: transport))
+        let job = try await pipeline.createJob(name: "Semantic retry", sources: [SourceDocument(name: "story.txt", text: "第一夜\n本文。")], series: false, settings: settings)
+        let planned = try await pipeline.run(jobID: job.id, settings: settings)
+        XCTAssertEqual(planned.status, .awaitingGuide)
+        XCTAssertEqual(planned.guide?.titleZh, "测试作品")
+        XCTAssertEqual(planned.plannerCheckpoint?.completedWindows.count, 1)
+        let plannerCalls = transport.recordedRequests.filter { request in
+            guard request.url?.path == "/v1/chat/completions",
+                  let body = try? JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any],
+                  let messages = body["messages"] as? [[String: String]] else { return false }
+            return messages.last?["content"]?.contains("通读原文") == true
+        }
+        XCTAssertEqual(plannerCalls.count, 2)
+        XCTAssertTrue(plannerCalls.last?.httpBody.flatMap { String(data: $0, encoding: .utf8) }?.contains("必填字段") == true)
+        XCTAssertNoThrow(try JSONDecoder().decode(TranslationGuide.self, from: Data("{}".utf8)))
+    }
+
     func testResumedTranslatedChunkIsReviewedWithoutRetranslating() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

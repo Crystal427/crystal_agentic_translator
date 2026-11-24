@@ -237,6 +237,7 @@ public struct TranslationPipeline: Sendable {
                     schema: Schemas.guide,
                     jobID: job.id,
                     role: "主控",
+                    validate: { Self.plannerValidationError($0) },
                     onEvent: onEvent
                 )
                 job.totalTokens += parsed.promptTokens + parsed.completionTokens
@@ -715,6 +716,25 @@ public struct TranslationPipeline: Sendable {
         return try JSONDecoder().decode(type, from: data)
     }
 
+    private static func plannerValidationError(_ guide: TranslationGuide) -> String? {
+        let requiredFields: [(String, String)] = [
+            ("title_zh", guide.titleZh),
+            ("source_language", guide.sourceLanguage),
+            ("genre", guide.genre),
+            ("synopsis", guide.synopsis),
+            ("style.narration", guide.style.narration),
+            ("style.tone", guide.style.tone),
+            ("style.diction", guide.style.diction),
+            ("style.dialogue", guide.style.dialogue),
+            ("style.punctuation", guide.style.punctuation)
+        ]
+        let missing = requiredFields.filter { $0.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.map(\.0)
+        if !missing.isEmpty { return "以下必填字段必须有实质内容：\(missing.joined(separator: ", "))。" }
+        let ruleCount = guide.rules.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
+        guard (3...8).contains(ruleCount) else { return "rules 必须包含 3 至 8 条非空翻译守则。" }
+        return nil
+    }
+
     private func requestJSON<T: Codable>(
         _ type: T.Type,
         prompt: ChatPrompt,
@@ -726,6 +746,7 @@ public struct TranslationPipeline: Sendable {
         schema: [String: Any],
         jobID: UUID,
         role: String,
+        validate: ((T) -> String?)? = nil,
         onEvent: @escaping @Sendable (PipelineEvent) -> Void
     ) async throws -> (value: T, promptTokens: Int, completionTokens: Int, rawJSON: String, structuredJSON: String) {
         var retryPrompt = prompt
@@ -748,6 +769,13 @@ public struct TranslationPipeline: Sendable {
                 completionTokens += response.completionTokens
                 do {
                     let value = try decode(type, response.content)
+                    if let validationError = validate?(value) {
+                        lastError = LMStudioError.invalidResponse
+                        if attempt < 2 {
+                            retryPrompt.user += "\n上一次 JSON 虽然语法可解析，但内容不符合规划要求：\(validationError)请修正后重新输出完整 JSON。"
+                        }
+                        continue
+                    }
                     let encoder = JSONEncoder()
                     encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
                     let structuredJSON = String(decoding: try encoder.encode(value), as: UTF8.self)
