@@ -135,6 +135,13 @@ final class QualityAndPromptTests: XCTestCase {
             XCTAssertTrue(report.hardFailures.contains { $0.message.contains("长度比异常") }, "Chinese length rules should apply to \(alias)")
             XCTAssertTrue(report.hardFailures.contains { $0.message.contains("残留原文字符比例") }, "Chinese script rules should apply to \(alias)")
         }
+
+        let pinyin = "Lao fangzi pangbian you yi tiao he. Anna dai zhe lanse de xin shang lou. Yu man le xiazhai de zhai lu. Mingtian huayuan hui zai ci kaihua. Ta deng dao zhongbiao xiang guo lingchen. Shanling na bian, yi lie huoche chuan guo shangu."
+        for romanizedTarget in ["Hanyu Pinyin", "cmn-Latn", "zh-Latn"] {
+            let report = TranslationQuality.inspect(source: source, translation: pinyin, sourceLanguage: "English", targetLanguage: romanizedTarget, glossary: [], previousTranslation: "")
+            XCTAssertFalse(report.hardFailures.contains { $0.message.contains("长度比异常") }, "Han-script length rules should not apply to \(romanizedTarget)")
+            XCTAssertFalse(report.hardFailures.contains { $0.message.contains("残留原文字符比例") }, "Han-script script rules should not apply to \(romanizedTarget)")
+        }
     }
 
     func testFallbackReviewUsesDesignScorePolicy() {

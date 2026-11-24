@@ -97,6 +97,11 @@ public enum TranslationQuality {
         let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
             .replacingOccurrences(of: "_", with: "-")
+        let tokens = normalized.split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        let romanizationTokens: Set<String> = ["latn", "latin", "pinyin", "romanized", "romanised", "romanization", "romanisation", "transliteration", "transliterated"]
+        if !romanizationTokens.isDisjoint(with: tokens)
+            || ["拼音", "罗马字", "羅馬字"].contains(where: normalized.contains) { return false }
+
         let languageCode = normalized.split(separator: "-").first.map(String.init) ?? normalized
         let chineseCodes: Set<String> = ["zh", "zho", "chi", "cmn", "yue"]
         if chineseCodes.contains(languageCode) { return true }
