@@ -80,6 +80,7 @@ public struct URLSessionTransport: LMStudioTransport {
 
 public enum LMStudioError: Error, LocalizedError, Sendable {
     case invalidBaseURL
+    case insecureBaseURL
     case http(status: Int, message: String)
     case emptyCompletion
     case insufficientContext(required: Int, available: Int)
@@ -88,6 +89,7 @@ public enum LMStudioError: Error, LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .invalidBaseURL: return "Enter a valid LM Studio server URL."
+        case .insecureBaseURL: return "Use HTTPS for remote LM Studio servers; plaintext HTTP is limited to loopback."
         case .http(let status, let message): return "LM Studio HTTP \(status): \(message)"
         case .emptyCompletion: return "The model returned no text."
         case .insufficientContext(let required, let available): return "The prompt requires about \(required) tokens, but the context budget is \(available). Reduce the chunk size or increase the context length."
@@ -244,7 +246,12 @@ public struct LMStudioClient: Sendable {
     }
 
     private func makeRequest(path: String, method: String, body: [String: Any]? = nil) throws -> URLRequest {
-        guard let root = URL(string: baseURL), let url = URL(string: path, relativeTo: root)?.absoluteURL else { throw LMStudioError.invalidBaseURL }
+        guard let root = URL(string: baseURL),
+              let scheme = root.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = root.host?.lowercased(),
+              root.user == nil, root.password == nil, root.query == nil, root.fragment == nil,
+              let url = URL(string: path, relativeTo: root)?.absoluteURL else { throw LMStudioError.invalidBaseURL }
+        guard scheme == "https" || Self.isLoopbackHost(host) else { throw LMStudioError.insecureBaseURL }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 120
@@ -255,6 +262,14 @@ public struct LMStudioClient: Sendable {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
         return request
+    }
+
+    private static func isLoopbackHost(_ host: String) -> Bool {
+        let normalized = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        if normalized == "localhost" || normalized == "localhost." || normalized == "::1" { return true }
+        let octets = normalized.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4, octets[0] == "127" else { return false }
+        return octets.dropFirst().allSatisfy { UInt8($0) != nil }
     }
 
     private func estimateTokens(_ text: String) -> Int {

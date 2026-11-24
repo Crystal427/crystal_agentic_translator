@@ -515,6 +515,47 @@ final class URLSessionTransportIntegrationTests: XCTestCase {
     }
 }
 
+final class LMStudioTransportSecurityTests: XCTestCase {
+    func testPlainHTTPIsRejectedForNonLoopbackHosts() async throws {
+        let transport = MockLMStudioTransport()
+        let client = LMStudioClient(baseURL: "http://api.example.com:1234", transport: transport)
+
+        do {
+            _ = try await client.models()
+            XCTFail("Remote plaintext HTTP must be rejected")
+        } catch LMStudioError.insecureBaseURL {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertTrue(transport.recordedRequests.isEmpty)
+    }
+
+    func testLoopbackHTTPAndRemoteHTTPSAreAllowed() async throws {
+        for baseURL in ["http://127.0.0.1:1234", "http://127.4.5.6:1234", "http://[::1]:1234", "http://localhost:1234", "https://api.example.com"] {
+            let transport = MockLMStudioTransport()
+            let client = LMStudioClient(baseURL: baseURL, transport: transport)
+            _ = try await client.models()
+            XCTAssertEqual(transport.recordedRequests.first?.url?.scheme, URL(string: baseURL)?.scheme)
+        }
+    }
+
+    func testInvalidURLAndUnsupportedSchemeAreRejected() async throws {
+        for baseURL in ["not a url", "ftp://localhost:1234"] {
+            let transport = MockLMStudioTransport()
+            let client = LMStudioClient(baseURL: baseURL, transport: transport)
+            do {
+                _ = try await client.models()
+                XCTFail("Invalid LM Studio URL must be rejected: \(baseURL)")
+            } catch LMStudioError.invalidBaseURL {
+            } catch {
+                XCTFail("Unexpected error for \(baseURL): \(error)")
+            }
+            XCTAssertTrue(transport.recordedRequests.isEmpty)
+        }
+    }
+}
+
 private final class MockLMStudioTransport: LMStudioTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var loaded: [String: (id: String, context: Int)] = [:]
