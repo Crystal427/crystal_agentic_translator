@@ -340,6 +340,40 @@ final class PersistenceAndPipelineTests: XCTestCase {
         XCTAssertEqual(finished.chunks[0].reviewScore, 80)
     }
 
+    func testFallbackRetainsLengthFinishReasonFromEarlierPart() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let alphabet = Array("甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥春夏秋冬山川江河天地风云星月日夜雨雪草木花鸟鱼虫")
+        func variedText(_ count: Int, seed: Int) -> String {
+            String((0..<count).map { alphabet[($0 * 7 + $0 / 11 + seed) % alphabet.count] })
+        }
+        let source = String(repeating: "Original passage. ", count: 180)
+        let store = JobStore(rootURL: root)
+        let priorReview = TranslationReview(verdict: "revise", automaticChecks: [QualityFinding(message: "先前截断", hard: true)], score: 30)
+        let attempts = (0..<2).map { _ -> TranslationAttempt in
+            var attempt = TranslationAttempt(translation: "旧译文。", temperature: 0.5)
+            attempt.review = priorReview
+            return attempt
+        }
+        let partOne = variedText(1_700, seed: 1)
+        let partTwo = variedText(600, seed: 5)
+        let transport = MockLMStudioTransport(chatResponses: [partOne, partTwo], chatFinishReasons: ["length", "stop"])
+        let settings = AppSettings(controllerModel: "controller", translatorModel: "translator", maxRetries: 0, pauseAfterOverview: false)
+        let chunk = TranslationChunk(index: 0, fileIndex: 0, fileName: "story.txt", source: source, status: .scouted, attempts: attempts)
+        var job = TranslationJob(name: "Fallback finish reason", series: false, sourceFiles: [SourceDocument(name: "story.txt", text: source)], chunks: [chunk])
+        job.guide = TranslationGuide(titleZh: "测试作品", sourceLanguage: "英语")
+        job.status = .paused
+        try await store.save(job)
+        let pipeline = TranslationPipeline(store: store, client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: transport))
+
+        let finished = try await pipeline.run(jobID: job.id, settings: settings)
+
+        let latest = try XCTUnwrap(finished.chunks[0].latestAttempt)
+        XCTAssertEqual(latest.finishReason, "length")
+        XCTAssertTrue(latest.review?.automaticChecks.contains { $0.message.contains("输出达到token上限") } == true)
+        XCTAssertEqual(finished.chunks[0].status, .flagged)
+    }
+
     func testBatchScoutsUseUpdatedGuideAndLaterTranslationUsesPriorDraft() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -584,15 +618,17 @@ private final class MockLMStudioTransport: LMStudioTransport, @unchecked Sendabl
     private var loaded: [String: (id: String, context: Int)] = [:]
     private var requests: [URLRequest] = []
     private var chatResponses: [String]
+    private var chatFinishReasons: [String]
     private var scoutRequests = 0
     private let cancelChatWhenUserContains: String?
     private let longScoutMemory: Bool
 
-    init(initiallyLoaded: [String: (id: String, context: Int)] = [:], chatResponses: [String] = [], cancelChatWhenUserContains: String? = nil, longScoutMemory: Bool = false) {
+    init(initiallyLoaded: [String: (id: String, context: Int)] = [:], chatResponses: [String] = [], cancelChatWhenUserContains: String? = nil, longScoutMemory: Bool = false, chatFinishReasons: [String] = []) {
         loaded = initiallyLoaded
         self.chatResponses = chatResponses
         self.cancelChatWhenUserContains = cancelChatWhenUserContains
         self.longScoutMemory = longScoutMemory
+        self.chatFinishReasons = chatFinishReasons
     }
 
     func enqueueChatResponses(_ responses: [String]) {
@@ -664,7 +700,8 @@ private final class MockLMStudioTransport: LMStudioTransport, @unchecked Sendabl
             response = #"{"summary":"人物继续前进。","new_terms":[],"translation_notes":[],"memory":"MEMORYPLACEHOLDER"}"#.replacingOccurrences(of: "MEMORYPLACEHOLDER", with: memory)
         }
         response = withLock { chatResponses.isEmpty ? response : chatResponses.removeFirst() }
-        let eventObject: [String: Any] = ["choices": [["delta": ["content": response], "finish_reason": "stop"]], "usage": ["prompt_tokens": 10, "completion_tokens": 10]]
+        let finishReason = withLock { chatFinishReasons.isEmpty ? "stop" : chatFinishReasons.removeFirst() }
+        let eventObject: [String: Any] = ["choices": [["delta": ["content": response], "finish_reason": finishReason]], "usage": ["prompt_tokens": 10, "completion_tokens": 10]]
         let event = String(data: (try? JSONSerialization.data(withJSONObject: eventObject)) ?? Data(), encoding: .utf8) ?? "{}"
         return AsyncThrowingStream { continuation in
             continuation.yield(event)

@@ -438,7 +438,11 @@ public struct TranslationPipeline: Sendable {
             translatedParts.append(response.content)
             promptTokens += response.promptTokens
             completionTokens += response.completionTokens
-            finishReason = response.finishReason
+            if response.finishReason == "length" {
+                finishReason = "length"
+            } else if finishReason != "length" {
+                finishReason = response.finishReason
+            }
         }
         return (Self.reassembleFallbackTranslations(parts: parts, translations: translatedParts), finishReason, promptTokens, completionTokens)
     }
