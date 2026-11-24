@@ -122,6 +122,11 @@ public actor JobStore {
         mergedOutput(for: job, fileIndex: fileIndex)
     }
 
+    public func output(jobID: UUID, fileIndex: Int) throws -> String? {
+        guard let job = try loadJob(id: jobID) else { return nil }
+        return mergedOutput(for: job, fileIndex: fileIndex)
+    }
+
     private func mergedOutput(for job: TranslationJob, fileIndex: Int) -> String {
         job.chunks.filter { $0.fileIndex == fileIndex }.sorted { $0.index < $1.index }.map { chunk in
             let body = chunk.finalTranslation.isEmpty ? "【待翻译：片段 \(chunk.index + 1)】" : chunk.finalTranslation

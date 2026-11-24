@@ -275,9 +275,8 @@ final class TranslatorAppModel {
         } catch { errorMessage = error.localizedDescription }
     }
 
-    func output(fileIndex: Int) async -> String {
-        guard let selectedJob else { return "" }
-        return await store.output(for: selectedJob, fileIndex: fileIndex)
+    func output(jobID: UUID, fileIndex: Int) async -> String {
+        (try? await store.output(jobID: jobID, fileIndex: fileIndex)) ?? ""
     }
 
     private func client() -> LMStudioClient {

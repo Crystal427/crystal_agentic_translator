@@ -567,7 +567,7 @@ private struct TranslationReaderView: View {
                         }.frame(maxWidth: 300)
                         Spacer()
                         Text("衬线阅读 · 未完成片段以占位符显示").font(.caption).foregroundStyle(.secondary)
-                        Button { exporting = true } label: { Label("导出文本…", systemImage: "square.and.arrow.down") }.buttonStyle(.bordered)
+                        Button { beginExport(job: job) } label: { Label("导出文本…", systemImage: "square.and.arrow.down") }.buttonStyle(.bordered)
                     }
                     .padding(.horizontal, 24).padding(.vertical, 12)
                     Divider()
@@ -577,11 +577,25 @@ private struct TranslationReaderView: View {
                     .frame(maxWidth: .infinity)
                     .background(Color(nsColor: .textBackgroundColor))
                 }
-                .task(id: "\(job.id)-\(fileIndex)") { text = await model.output(fileIndex: min(fileIndex, job.sourceFiles.count - 1)) }
+                .task(id: "\(job.id)-\(fileIndex)-\(job.updatedAt.timeIntervalSinceReferenceDate)") {
+                    let output = await model.output(jobID: job.id, fileIndex: min(fileIndex, job.sourceFiles.count - 1))
+                    guard !Task.isCancelled else { return }
+                    text = output
+                }
                 .fileExporter(isPresented: $exporting, document: TextExportDocument(text: text), contentType: .plainText, defaultFilename: exportName(job.sourceFiles[min(fileIndex, job.sourceFiles.count - 1)].name)) { result in if case .failure(let error) = result { model.errorMessage = error.localizedDescription } }
             } else {
                 ContentUnavailableView("暂无译文", systemImage: "text.book.closed", description: Text("选择含有源文件的任务以阅读进度中的译文。"))
             }
+        }
+    }
+
+    private func beginExport(job: TranslationJob) {
+        let requestedFileIndex = min(fileIndex, job.sourceFiles.count - 1)
+        Task {
+            let output = await model.output(jobID: job.id, fileIndex: requestedFileIndex)
+            guard model.selectedJobID == job.id else { return }
+            text = output
+            exporting = true
         }
     }
 

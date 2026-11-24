@@ -246,6 +246,22 @@ final class PersistenceAndPipelineTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("jobs/\(job.id.uuidString)/chunks/00001.json").path))
     }
 
+    func testOutputByJobIDReloadsTheLatestPersistedTranslation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = JobStore(rootURL: root)
+        let chunk = TranslationChunk(index: 0, fileIndex: 0, fileName: "story.txt", source: "hello", status: .done, finalTranslation: "初稿")
+        var job = TranslationJob(name: "Fresh output", series: false, sourceFiles: [SourceDocument(name: "story.txt", text: "hello")], chunks: [chunk])
+        try await store.save(job)
+        let first = try await store.output(jobID: job.id, fileIndex: 0)
+        XCTAssertEqual(first, "初稿")
+
+        job.chunks[0].finalTranslation = "最新译文"
+        try await store.save(job)
+        let latest = try await store.output(jobID: job.id, fileIndex: 0)
+        XCTAssertEqual(latest, "最新译文")
+    }
+
     func testPipelineRunsPlannerScoutTranslatorReviewerAndPersistsCompletion() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
