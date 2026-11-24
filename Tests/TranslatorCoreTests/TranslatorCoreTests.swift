@@ -108,16 +108,29 @@ final class TextProcessingTests: XCTestCase {
         XCTAssertEqual(secondNightChunk.leadingWhitespace, "\n\n\n")
     }
 
-    func testShortTailRebalanceUsesSafeBoundaryAndKeepsNamedTermTogether() {
-        let namedTerm = "竜王記憶の鍵"
-        let sentence = String(repeating: "甲", count: 120) + "。" + String(repeating: "乙", count: 24) + namedTerm + String(repeating: "丙", count: 105)
-        let source = sentence + String(repeating: "後", count: 45)
-        let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "named-term.txt", text: source, maxCharacters: 256, contextCharacters: 0)
+    func testShortFinalChunkPreservesInitialBoundaryAroundAbbreviation() {
+        let title = "Dr. Watson"
+        let firstChunk = String(repeating: "x", count: 60) + title + String(repeating: "y", count: 186)
+        let source = firstChunk + String(repeating: "z", count: 44)
+        let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "abbreviation.txt", text: source, maxCharacters: 256, contextCharacters: 0)
 
         XCTAssertEqual(chunks.map(\.rawText).joined(), source)
-        XCTAssertEqual(chunks.map(\.source.count), [121, 180])
-        XCTAssertEqual(chunks.first?.source, String(repeating: "甲", count: 120) + "。")
-        XCTAssertTrue(chunks.contains { $0.source.contains(namedTerm) })
+        XCTAssertEqual(chunks.map(\.source.count), [256, 44])
+        XCTAssertTrue(chunks[0].source.contains(title))
+    }
+
+    func testLeadingNewlinesKeepShortNextSceneSeparate() {
+        let firstScene = String(repeating: "甲", count: 256)
+        let nextScene = "次の場面。"
+        let source = firstScene + String(repeating: "\n", count: 256) + nextScene
+        let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "scenes.txt", text: source, maxCharacters: 256, contextCharacters: 0)
+
+        XCTAssertEqual(chunks.map(\.rawText).joined(), source)
+        XCTAssertEqual(chunks.count, 2)
+        XCTAssertEqual(chunks[0].source, firstScene)
+        XCTAssertEqual(chunks[1].leadingWhitespace, String(repeating: "\n", count: 256))
+        XCTAssertEqual(chunks[1].source, nextScene)
+        XCTAssertTrue(chunks.allSatisfy { !$0.source.isEmpty && $0.source.count <= 256 })
     }
 
     func testZeroChunkContextIsEmptyOnBothSides() {

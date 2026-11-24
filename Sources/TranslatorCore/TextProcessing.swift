@@ -117,42 +117,6 @@ public enum TextChunker {
         let trailingWhitespace = pendingWhitespace
         rawChunks = retainedChunks
 
-        if rawChunks.count > 1 {
-            let lastIndex = rawChunks.count - 1
-            let last = rawChunks[lastIndex]
-            let lastBody = takeTrailingWhitespace(takeLeadingWhitespace(last).1).0
-            let firstMeaningfulLine = last.split(separator: "\n", omittingEmptySubsequences: false)
-                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                .first { !$0.isEmpty }
-            if lastBody.count < Int(Double(limit) * 0.20),
-               let firstMeaningfulLine,
-               !isSectionHeading(firstMeaningfulLine),
-               !isSectionDivider(firstMeaningfulLine) {
-                let previousIndex = lastIndex - 1
-                let joined = rawChunks[previousIndex] + leadingWhitespacePrefixes[lastIndex] + last
-                if joined.count <= limit {
-                    rawChunks[previousIndex] = joined
-                    rawChunks.removeLast()
-                    leadingWhitespacePrefixes.removeLast()
-                } else if joined.count - limit <= limit, !hasSemanticBoundaryAtEnd(rawChunks[previousIndex]) {
-                    let minimumOffset = max(1, joined.count - limit)
-                    let maximumOffset = min(limit, joined.count - 1)
-                    let candidates = safeRebalanceSplits(in: joined, minimumOffset: minimumOffset, maximumOffset: maximumOffset)
-                    if !candidates.isEmpty {
-                        let target = joined.count / 2
-                        if let split = candidates.min(by: {
-                            abs(joined.distance(from: joined.startIndex, to: $0) - target)
-                                < abs(joined.distance(from: joined.startIndex, to: $1) - target)
-                        }) {
-                            rawChunks[previousIndex] = String(joined[..<split])
-                            rawChunks[lastIndex] = String(joined[split...])
-                            leadingWhitespacePrefixes[lastIndex] = ""
-                        }
-                    }
-                }
-            }
-        }
-
         let completeRawChunks = rawChunks.indices.map { index in
             leadingWhitespacePrefixes[index] + rawChunks[index] + (index == rawChunks.count - 1 ? trailingWhitespace : "")
         }
@@ -215,46 +179,6 @@ public enum TextChunker {
     private static func sceneBreak(in text: String, minimumOffset: Int) -> String.Index? {
         guard let range = text.range(of: "\n\n", options: .backwards) else { return nil }
         return text.distance(from: text.startIndex, to: range.lowerBound) >= minimumOffset ? range.lowerBound : nil
-    }
-
-    private static func hasSemanticBoundaryAtEnd(_ text: String) -> Bool {
-        let (body, trailing) = takeTrailingWhitespace(text)
-        if let last = body.last, isSentenceEnding(last) { return true }
-        return trailing.filter { $0 == "\n" }.count >= 2
-    }
-
-    private static func safeRebalanceSplits(in text: String, minimumOffset: Int, maximumOffset: Int) -> [String.Index] {
-        var candidates: [String.Index] = []
-        var cursor = text.startIndex
-        while cursor < text.endIndex {
-            let character = text[cursor]
-            var split: String.Index?
-            if isSentenceEnding(character) {
-                var end = text.index(after: cursor)
-                while end < text.endIndex && (isSentenceEnding(text[end]) || text[end].isWhitespace) {
-                    end = text.index(after: end)
-                }
-                split = end
-            } else if character == "\n" {
-                var end = text.index(after: cursor)
-                if end < text.endIndex && text[end] == "\n" {
-                    while end < text.endIndex && text[end] == "\n" {
-                        end = text.index(after: end)
-                    }
-                    split = end
-                }
-            }
-            if let split {
-                let offset = text.distance(from: text.startIndex, to: split)
-                if offset >= minimumOffset && offset <= maximumOffset,
-                   text[..<split].contains(where: { !$0.isWhitespace }),
-                   text[split...].contains(where: { !$0.isWhitespace }) {
-                    candidates.append(split)
-                }
-            }
-            cursor = text.index(after: cursor)
-        }
-        return candidates
     }
 
     private static func takeLeadingWhitespace(_ text: String) -> (String, String) {
