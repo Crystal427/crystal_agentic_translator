@@ -67,7 +67,9 @@ public struct TranslationPipeline: Sendable {
             for var chunk in fileChunks {
                 let chunkStart = sourceOffset
                 let chunkEnd = chunkStart + chunk.rawText.count
-                if let section = sections.first(where: { $0.startOffset < chunkEnd && $0.endOffset > chunkStart }) {
+                let contentStart = chunkStart + chunk.leadingWhitespace.count
+                let contentEnd = contentStart + chunk.source.count
+                if let section = sections.first(where: { $0.startOffset < contentEnd && $0.endOffset > contentStart }) {
                     chunk.sectionID = section.id
                     chunk.sectionTitle = section.title
                 }

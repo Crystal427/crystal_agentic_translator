@@ -74,6 +74,40 @@ final class TextProcessingTests: XCTestCase {
         XCTAssertTrue(chunks.first?.source.hasPrefix("第一夜") == true)
     }
 
+    func testLargeWhitespaceAndShortTailPreserveLosslessBoundedBodies() {
+        let blankLineCounts = [0, 1, 3, 256, 257, 512, 513, 1_024, 1_475]
+        let tailLengths = [1, 3, 32, 50]
+        for blankLineCount in blankLineCounts {
+            for tailLength in tailLengths {
+                let tail = String(repeating: "終", count: tailLength)
+                let source = String(repeating: "甲", count: 600) + "\n" + String(repeating: "\n", count: blankLineCount) + tail
+                let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "whitespace.txt", text: source, maxCharacters: 256, contextCharacters: 0)
+
+                XCTAssertEqual(chunks.map(\.rawText).joined(), source, "blank lines: \(blankLineCount), tail: \(tailLength)")
+                XCTAssertTrue(chunks.allSatisfy { !$0.source.isEmpty && $0.source.count <= 256 }, "blank lines: \(blankLineCount), tail: \(tailLength)")
+            }
+        }
+    }
+
+    func testBlankPrefixBeforeFinalChapterPreservesSectionMetadata() async throws {
+        let source = "第一夜\n" + String(repeating: "甲", count: 251) + "\n\n\n\n第二夜\n短い本文。"
+        let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "夢十夜.txt", text: source, maxCharacters: 256, contextCharacters: 0)
+        XCTAssertEqual(chunks.map(\.rawText).joined(), source)
+        XCTAssertTrue(chunks.allSatisfy { !$0.source.isEmpty && $0.source.count <= 256 })
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pipeline = TranslationPipeline(store: JobStore(rootURL: root), client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: MockLMStudioTransport()))
+        let job = try await pipeline.createJob(name: "Chapter boundary", sources: [SourceDocument(name: "夢十夜.txt", text: source)], series: false, settings: AppSettings(maxChunkCharacters: 256))
+        let secondNight = try XCTUnwrap(job.sections?.first { $0.title == "第二夜" })
+        let secondNightChunk = try XCTUnwrap(job.chunks.first { $0.source.hasPrefix("第二夜") })
+
+        XCTAssertEqual(job.chunks.map(\.rawText).joined(), source)
+        XCTAssertEqual(secondNightChunk.sectionID, secondNight.id)
+        XCTAssertEqual(secondNightChunk.sectionTitle, "第二夜")
+        XCTAssertEqual(secondNightChunk.leadingWhitespace, "\n\n\n")
+    }
+
     func testZeroChunkContextIsEmptyOnBothSides() {
         let source = String(repeating: "a", count: 600)
         let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "context.txt", text: source, maxCharacters: 256, contextCharacters: 0)

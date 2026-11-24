@@ -103,53 +103,67 @@ public enum TextChunker {
         appendCurrent()
 
         var retainedChunks: [String] = []
+        var leadingWhitespacePrefixes: [String] = []
         var pendingWhitespace = ""
         for raw in rawChunks {
             if raw.allSatisfy(\.isWhitespace) {
                 pendingWhitespace += raw
             } else {
-                retainedChunks.append(pendingWhitespace + raw)
+                retainedChunks.append(raw)
+                leadingWhitespacePrefixes.append(pendingWhitespace)
                 pendingWhitespace = ""
             }
         }
-        if !pendingWhitespace.isEmpty, !retainedChunks.isEmpty {
-            retainedChunks[retainedChunks.count - 1] += pendingWhitespace
-        }
+        let trailingWhitespace = pendingWhitespace
         rawChunks = retainedChunks
 
-        if rawChunks.count > 1, let last = rawChunks.last, last.count < Int(Double(limit) * 0.20),
-           let firstLine = last.components(separatedBy: "\n").first,
-           !isSectionHeading(firstLine.trimmingCharacters(in: .whitespacesAndNewlines)),
-           !isSectionDivider(firstLine.trimmingCharacters(in: .whitespacesAndNewlines)) {
-            let previousIndex = rawChunks.count - 2
-            let previous = rawChunks[previousIndex]
-            let joined = previous + last
-            if joined.count <= limit {
-                rawChunks[previousIndex] = joined
-                rawChunks.removeLast()
-            } else {
-                let minimumOffset = max(1, joined.count - limit)
-                let maximumOffset = min(limit, joined.count - 1)
-                let validSplits = joined.indices.filter { split in
-                    let offset = joined.distance(from: joined.startIndex, to: split)
-                    guard (minimumOffset...maximumOffset).contains(offset) else { return false }
-                    return joined[..<split].contains(where: { !$0.isWhitespace })
-                        && joined[split...].contains(where: { !$0.isWhitespace })
-                }
-                let lineSplits = validSplits.filter { joined[$0] == "\n" }
-                let candidates = lineSplits.isEmpty ? validSplits : lineSplits
-                let target = joined.count / 2
-                if let split = candidates.min(by: {
-                    abs(joined.distance(from: joined.startIndex, to: $0) - target)
-                        < abs(joined.distance(from: joined.startIndex, to: $1) - target)
-                }) {
-                    rawChunks[previousIndex] = String(joined[..<split])
-                    rawChunks[previousIndex + 1] = String(joined[split...])
+        if rawChunks.count > 1 {
+            let lastIndex = rawChunks.count - 1
+            let last = rawChunks[lastIndex]
+            let lastBody = takeTrailingWhitespace(takeLeadingWhitespace(last).1).0
+            let firstMeaningfulLine = last.split(separator: "\n", omittingEmptySubsequences: false)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty }
+            if lastBody.count < Int(Double(limit) * 0.20),
+               let firstMeaningfulLine,
+               !isSectionHeading(firstMeaningfulLine),
+               !isSectionDivider(firstMeaningfulLine) {
+                let previousIndex = lastIndex - 1
+                let joined = rawChunks[previousIndex] + leadingWhitespacePrefixes[lastIndex] + last
+                if joined.count <= limit {
+                    rawChunks[previousIndex] = joined
+                    rawChunks.removeLast()
+                    leadingWhitespacePrefixes.removeLast()
+                } else if joined.count - limit <= limit {
+                    let minimumOffset = max(1, joined.count - limit)
+                    let maximumOffset = min(limit, joined.count - 1)
+                    if minimumOffset <= maximumOffset {
+                        let validSplits = joined.indices.filter { split in
+                            let offset = joined.distance(from: joined.startIndex, to: split)
+                            guard offset >= minimumOffset && offset <= maximumOffset else { return false }
+                            return joined[..<split].contains(where: { !$0.isWhitespace })
+                                && joined[split...].contains(where: { !$0.isWhitespace })
+                        }
+                        let lineSplits = validSplits.filter { joined[$0] == "\n" }
+                        let candidates = lineSplits.isEmpty ? validSplits : lineSplits
+                        let target = joined.count / 2
+                        if let split = candidates.min(by: {
+                            abs(joined.distance(from: joined.startIndex, to: $0) - target)
+                                < abs(joined.distance(from: joined.startIndex, to: $1) - target)
+                        }) {
+                            rawChunks[previousIndex] = String(joined[..<split])
+                            rawChunks[lastIndex] = String(joined[split...])
+                            leadingWhitespacePrefixes[lastIndex] = ""
+                        }
+                    }
                 }
             }
         }
 
-        return rawChunks.enumerated().map { index, raw in
+        let completeRawChunks = rawChunks.indices.map { index in
+            leadingWhitespacePrefixes[index] + rawChunks[index] + (index == rawChunks.count - 1 ? trailingWhitespace : "")
+        }
+        return completeRawChunks.enumerated().map { index, raw in
             let (leading, bodyAndTrailing) = takeLeadingWhitespace(raw)
             let (body, trailing) = takeTrailingWhitespace(bodyAndTrailing)
             return TranslationChunk(
@@ -159,8 +173,8 @@ public enum TextChunker {
                 source: body,
                 leadingWhitespace: leading,
                 trailingWhitespace: trailing,
-                previousTail: index > 0 ? contextTail(rawChunks[index - 1], count: contextCharacters) : "",
-                nextHead: index + 1 < rawChunks.count ? contextHead(rawChunks[index + 1], count: contextCharacters) : ""
+                previousTail: index > 0 ? contextTail(completeRawChunks[index - 1], count: contextCharacters) : "",
+                nextHead: index + 1 < completeRawChunks.count ? contextHead(completeRawChunks[index + 1], count: contextCharacters) : ""
             )
         }
     }
