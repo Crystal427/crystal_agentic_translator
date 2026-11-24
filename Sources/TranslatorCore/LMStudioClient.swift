@@ -39,9 +39,12 @@ public struct URLSessionTransport: LMStudioTransport {
                     guard (200..<300).contains(code) else {
                         throw LMStudioError.http(status: code, message: "LM Studio returned HTTP \(code).")
                     }
+                    var lineBytes: [UInt8] = []
                     var dataLines: [String] = []
-                    for try await line in bytes.lines {
-                        try Task.checkCancellation()
+                    func processLine() {
+                        if lineBytes.last == 0x0D { lineBytes.removeLast() }
+                        let line = String(decoding: lineBytes, as: UTF8.self)
+                        lineBytes.removeAll(keepingCapacity: true)
                         if line.isEmpty {
                             if !dataLines.isEmpty {
                                 continuation.yield(dataLines.joined(separator: "\n"))
@@ -53,7 +56,13 @@ public struct URLSessionTransport: LMStudioTransport {
                             dataLines.append(value)
                         }
                     }
+                    for try await byte in bytes {
+                        try Task.checkCancellation()
+                        if byte == 0x0A { processLine() }
+                        else { lineBytes.append(byte) }
+                    }
                     try Task.checkCancellation()
+                    if !lineBytes.isEmpty { processLine() }
                     if !dataLines.isEmpty { continuation.yield(dataLines.joined(separator: "\n")) }
                     continuation.finish()
                 } catch is CancellationError {

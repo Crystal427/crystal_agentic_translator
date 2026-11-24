@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import XCTest
 @testable import TranslatorCore
 
@@ -492,6 +493,28 @@ final class PersistenceAndPipelineTests: XCTestCase {
     }
 }
 
+final class URLSessionTransportIntegrationTests: XCTestCase {
+    func testChatParsesIncrementalMultilineSSEOverLocalHTTP() async throws {
+        let body = Data("data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}],\r\ndata: \"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\r\n\r\ndata: [DONE]\n\n".utf8)
+        let server = try LocalSSEHTTPServer(body: body)
+        let port = try server.start()
+        defer { server.stop() }
+        let client = LMStudioClient(baseURL: "http://127.0.0.1:\(port)", transport: URLSessionTransport())
+
+        let response = try await client.chat(
+            model: "translator",
+            prompt: ChatPrompt(system: "Translate.", user: "Hello."),
+            temperature: 0.5,
+            maxTokens: 64,
+            contextLength: 2_048
+        )
+
+        XCTAssertEqual(response.content, "你好")
+        XCTAssertEqual(response.promptTokens, 7)
+        XCTAssertEqual(response.completionTokens, 3)
+    }
+}
+
 private final class MockLMStudioTransport: LMStudioTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var loaded: [String: (id: String, context: Int)] = [:]
@@ -589,5 +612,58 @@ private final class MockLMStudioTransport: LMStudioTransport, @unchecked Sendabl
         lock.lock()
         defer { lock.unlock() }
         return try body()
+    }
+}
+
+private final class LocalSSEHTTPServer: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "translator.tests.local-sse")
+    private let ready = DispatchSemaphore(value: 0)
+    private let responseFragments: [Data]
+    private var listeningPort: UInt16?
+
+    init(body: Data) throws {
+        listener = try NWListener(using: .tcp, on: .any)
+        guard let marker = body.range(of: Data("你".utf8)) else { throw LMStudioError.invalidResponse }
+        let split = marker.lowerBound + 1
+        let header = Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+        responseFragments = [header, Data(body[..<split]), Data(body[split...])]
+        listener.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                self?.listeningPort = self?.listener.port?.rawValue
+                self?.ready.signal()
+            case .failed:
+                self?.ready.signal()
+            default:
+                break
+            }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { connection.cancel(); return }
+            connection.start(queue: self.queue)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { _, _, _, error in
+                guard error == nil else { connection.cancel(); return }
+                self.sendNext(connection, index: 0)
+            }
+        }
+    }
+
+    func start() throws -> UInt16 {
+        listener.start(queue: queue)
+        guard ready.wait(timeout: .now() + 5) == .success, let listeningPort else { throw LMStudioError.invalidBaseURL }
+        return listeningPort
+    }
+
+    func stop() { listener.cancel() }
+
+    deinit { listener.cancel() }
+
+    private func sendNext(_ connection: NWConnection, index: Int) {
+        guard responseFragments.indices.contains(index) else { connection.cancel(); return }
+        connection.send(content: responseFragments[index], completion: .contentProcessed { [weak self] error in
+            guard error == nil, let self else { connection.cancel(); return }
+            self.sendNext(connection, index: index + 1)
+        })
     }
 }
