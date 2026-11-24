@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import TranslatorCore
+import CoreFoundation
 
 struct TranslatorRootView: View {
     @Bindable var model: TranslatorAppModel
@@ -98,6 +99,7 @@ struct TranslatorRootView: View {
         case .guide: GuideEditorView(model: model)
         case .memory: MemoryHistoryView(model: model)
         case .settings: SettingsView(model: model)
+        case .diary: WorkspaceDiaryView(model: model)
         }
     }
 
@@ -376,22 +378,32 @@ private struct ProgressDashboard: View {
     }
 
     private var controllerPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let snapshots = model.selectedJob?.agentOutputSnapshots ?? []
+        return VStack(alignment: .leading, spacing: 8) {
             Label("主控 Agent", systemImage: "brain.head.profile").font(.headline).foregroundStyle(.purple)
             GeometryReader { geometry in
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 10) {
-                        if !model.controllerReasoning.isEmpty {
-                            Text(model.controllerReasoning).font(.system(.caption, design: .monospaced)).italic().foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
+                        if snapshots.isEmpty && model.controllerOutput.isEmpty && model.controllerReasoning.isEmpty {
+                            Text("等待模型输出…").foregroundStyle(.secondary)
                         }
-                        Text(model.controllerOutput.isEmpty ? "等待模型输出…" : model.controllerOutput)
-                            .font(.system(.callout, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
+                        if !model.controllerReasoning.isEmpty {
+                            DisclosureGroup("查看思考过程") {
+                                Text(model.controllerReasoning).font(.system(.caption, design: .monospaced)).italic().foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        if !model.controllerOutput.isEmpty && (model.controllerOutputInProgress || snapshots.isEmpty) {
+                            DisclosureGroup(model.controllerOutputInProgress ? "实时模型输出" : "未解析的模型输出") {
+                                Text(model.controllerOutput).font(.system(.caption, design: .monospaced))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        ForEach(snapshots) { snapshot in AgentSnapshotView(snapshot: snapshot) }
                     }
                     .frame(width: max(0, geometry.size.width - 20), alignment: .leading)
                     .padding(10)
@@ -422,6 +434,127 @@ private struct ProgressDashboard: View {
         let estimate = elapsed / Double(job.completedCount) * Double(job.chunks.count - job.completedCount)
         return duration(estimate)
     }
+}
+
+private struct AgentSnapshotView: View {
+    var snapshot: AgentOutputSnapshot
+
+    private var title: String {
+        switch snapshot.role {
+        case "planner": "主控规划 · 窗口 \(snapshot.windowIndex ?? 0)"
+        case "scout": "主控预读 · 片段 \((snapshot.chunkIndex ?? 0) + 1)"
+        case "reviewer": "主控评审 · 片段 \((snapshot.chunkIndex ?? 0) + 1)"
+        default: snapshot.role
+        }
+    }
+
+    private var structuredValue: SnapshotJSONValue? {
+        guard let data = snapshot.structuredJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        return SnapshotJSONValue.parse(object)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.purple)
+            if let structuredValue {
+                SnapshotStructuredView(label: "", value: structuredValue)
+            } else {
+                Text("结构化结果暂不可用。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            DisclosureGroup("查看原始 JSON") {
+                Text(snapshot.rawJSON).font(.system(.caption2, design: .monospaced)).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(9)
+        .background(.purple.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private indirect enum SnapshotJSONValue {
+    case scalar(String)
+    case object([(String, SnapshotJSONValue)])
+    case array([SnapshotJSONValue])
+
+    static func parse(_ value: Any) -> SnapshotJSONValue {
+        if let object = value as? [String: Any] {
+            return .object(object.keys.filter { $0 != "id" }.sorted().map { ($0, parse(object[$0] ?? NSNull())) })
+        }
+        if let array = value as? [Any] { return .array(array.map(parse)) }
+        if value is NSNull { return .scalar("—") }
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() { return .scalar(number.boolValue ? "是" : "否") }
+            return .scalar(number.stringValue)
+        }
+        return .scalar(String(describing: value))
+    }
+}
+
+private struct SnapshotStructuredView: View {
+    var label: String
+    var value: SnapshotJSONValue
+
+    var body: some View { render(value, label: label, depth: 0) }
+
+    private func render(_ value: SnapshotJSONValue, label: String, depth: Int) -> AnyView {
+        switch value {
+        case .scalar(let text):
+            return AnyView(
+                HStack(alignment: .top, spacing: 8) {
+                    if !label.isEmpty { Text(localizedLabel(label)).font(.caption.weight(.medium)).foregroundStyle(.secondary).frame(width: 92, alignment: .leading) }
+                    Text(text).font(.callout).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            )
+        case .object(let fields):
+            return AnyView(
+                VStack(alignment: .leading, spacing: 6) {
+                    if !label.isEmpty { Text(localizedLabel(label)).font(.caption.weight(.semibold)).foregroundStyle(.secondary) }
+                    ForEach(Array(fields.enumerated()), id: \.offset) { _, field in
+                        render(field.1, label: field.0, depth: depth + 1)
+                    }
+                }
+                .padding(depth == 0 ? 0 : 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(depth == 0 ? Color.clear : Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 7))
+            )
+        case .array(let values):
+            return AnyView(
+                VStack(alignment: .leading, spacing: 5) {
+                    if !label.isEmpty { Text(localizedLabel(label)).font(.caption.weight(.semibold)).foregroundStyle(.secondary) }
+                    ForEach(Array(values.enumerated()), id: \.offset) { index, item in
+                        render(item, label: "第\(index + 1)项", depth: depth + 1)
+                            .padding(7)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.background, in: RoundedRectangle(cornerRadius: 7))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            )
+        }
+    }
+}
+
+private func localizedLabel(_ key: String) -> String {
+    let labels = [
+        "title_zh": "中文标题", "source_language": "原文语言", "genre": "体裁", "synopsis": "故事梗概",
+        "style": "文风", "narration": "叙述方式", "tone": "基调", "diction": "措辞", "dialogue": "对话",
+        "punctuation": "标点", "characters": "人物", "source": "原文名称", "target": "锁定译名", "gender": "性别",
+        "role": "身份", "voice": "口吻", "aliases": "别名与称呼", "terms": "专名与术语", "category": "类别",
+        "note": "说明", "rules": "翻译守则", "sections": "小节分析", "section_id": "小节标识", "source_title": "原文标题",
+        "section_type": "小节类型", "summary": "摘要", "evidence": "原文证据",
+        "new_terms": "新术语", "translation_notes": "翻译提示", "memory": "剧情记忆", "scores": "分项评分",
+        "accuracy": "准确性", "completeness": "完整性", "terminology": "术语", "fluency": "流畅度", "score": "总评分",
+        "issues": "发现的问题", "type": "问题类型", "severity": "严重程度", "translation": "当前译文",
+        "suggestion": "修改建议", "revision_instructions": "修订指令", "verdict": "评审结论", "comment": "评审意见",
+        "hard": "硬性问题", "penalty": "扣分", "automatic_checks": "自动检查", "model_reviewed": "模型评审"
+    ]
+    return labels[key] ?? key.replacingOccurrences(of: "_", with: " ")
 }
 
 struct CompactProgressWindow: View {
@@ -797,6 +930,35 @@ private struct GuideEditorView: View {
                         TextField("体裁", text: $guide.genre)
                         TextField("梗概", text: $guide.synopsis, axis: .vertical).lineLimit(3...7)
                     }
+                    Section("原文小节结构（\(job.sections?.filter(\.isExplicit).count ?? 0)）") {
+                        let explicitSections = (job.sections ?? []).filter(\.isExplicit)
+                        if explicitSections.isEmpty {
+                            Text("未检测到显式小节标记。")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(explicitSections) { section in
+                            HStack {
+                                Text(section.title.isEmpty ? "（前置内容）" : section.title)
+                                Spacer()
+                                Text(section.marker.isEmpty ? "未标记" : section.marker).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Section("主控小节分析（\(guide.sections.count)）") {
+                        if guide.sections.isEmpty {
+                            Text("完成大纲阅读后，主控会依据原文证据说明小节关系。")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(guide.sections) { section in
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(section.sourceTitle).font(.headline)
+                                Text(section.sectionType).font(.caption).foregroundStyle(.secondary)
+                                Text(section.summary)
+                                Text("原文证据：\(section.evidence)").font(.caption).foregroundStyle(.tertiary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
                     Section("文风") {
                         styleField("叙述", text: $guide.style.narration)
                         styleField("基调", text: $guide.style.tone)
@@ -900,35 +1062,136 @@ private struct MemoryHistoryView: View {
     }
 }
 
+private struct WorkspaceDiaryView: View {
+    @Bindable var model: TranslatorAppModel
+    @State private var searchText = ""
+    @State private var levelFilter = "全部"
+    @State private var categoryFilter = "全部"
+
+    private var filteredEntries: [WorkspaceDiaryEntry] {
+        Array(model.diaryEntries.filter { entry in
+            (levelFilter == "全部" || levelFilter == entry.level.rawValue) &&
+            (categoryFilter == "全部" || categoryFilter == entry.category.rawValue) &&
+            (searchText.isEmpty || entry.message.localizedCaseInsensitiveContains(searchText))
+        }.reversed())
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                PageHeading(title: "工作区日记", subtitle: "记录连接、导入、设置、队列和运行状态；凭据与原文不会写入日记。")
+                Spacer()
+                Button { Task { await model.reloadDiary() } } label: { Label("刷新", systemImage: "arrow.clockwise") }
+            }
+            HStack {
+                TextField("搜索日记", text: $searchText).textFieldStyle(.roundedBorder)
+                Picker("级别", selection: $levelFilter) {
+                    Text("全部").tag("全部")
+                    ForEach(WorkspaceDiaryLevel.allCases, id: \.rawValue) { Text($0.rawValue).tag($0.rawValue) }
+                }.frame(width: 120)
+                Picker("类别", selection: $categoryFilter) {
+                    Text("全部").tag("全部")
+                    ForEach(WorkspaceDiaryCategory.allCases, id: \.rawValue) { Text($0.rawValue).tag($0.rawValue) }
+                }.frame(width: 140)
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(filteredEntries) { entry in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 8) {
+                                Text(entry.level.rawValue.uppercased()).font(.caption2.weight(.bold)).foregroundStyle(diaryLevelColor(entry.level))
+                                Text(entry.category.rawValue).font(.caption).foregroundStyle(.secondary)
+                                Spacer()
+                                Text(entry.timestamp.formatted(date: .abbreviated, time: .standard)).font(.caption2).foregroundStyle(.tertiary)
+                            }
+                            Text(entry.message).font(.callout).textSelection(.enabled)
+                            if let jobID = entry.jobID { Text(jobID.uuidString).font(.caption2.monospaced()).foregroundStyle(.tertiary) }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(.background, in: RoundedRectangle(cornerRadius: 9))
+                    }
+                }
+            }
+            .overlay {
+                if filteredEntries.isEmpty {
+                    ContentUnavailableView("没有匹配的日记", systemImage: "clock.arrow.circlepath")
+                }
+            }
+        }
+        .padding(24)
+        .task { await model.reloadDiary() }
+    }
+}
+
+private func diaryLevelColor(_ level: WorkspaceDiaryLevel) -> Color {
+    switch level {
+    case .info: .secondary
+    case .warning: .orange
+    case .error: .red
+    }
+}
+
 struct SettingsView: View {
     @Bindable var model: TranslatorAppModel
+    @State private var credentialDraft = ""
 
     var body: some View {
         Form {
-            Section("LM Studio 连接") {
-                TextField("服务地址", text: $model.settings.baseURL)
-                Picker("主控模型", selection: $model.settings.controllerModel) {
-                    if model.availableModels.isEmpty { Text(model.settings.controllerModel).tag(model.settings.controllerModel) }
-                    ForEach(model.availableModels.filter { $0.type == "llm" }) { item in Text("\(item.displayName)\(item.loadedInstances.isEmpty ? "" : " · 已加载")").tag(item.key) }
+            Section("模型服务") {
+                Picker("服务提供方", selection: Binding(get: { model.settings.provider }, set: { model.selectProvider($0) })) {
+                    Text("LM Studio").tag(ModelProvider.lmStudio)
+                    Text("GLM Coding Plan").tag(ModelProvider.glmCodingPlan)
                 }
-                Picker("翻译模型", selection: $model.settings.translatorModel) {
-                    if model.availableModels.isEmpty { Text(model.settings.translatorModel).tag(model.settings.translatorModel) }
-                    ForEach(model.availableModels.filter { $0.type == "llm" }) { item in Text("\(item.displayName)\(item.loadedInstances.isEmpty ? "" : " · 已加载")").tag(item.key) }
+                TextField("服务地址", text: $model.settings.baseURL)
+                if model.settings.provider == .lmStudio {
+                    Picker("主控模型", selection: $model.settings.controllerModel) {
+                        if model.availableModels.isEmpty { Text(model.settings.controllerModel).tag(model.settings.controllerModel) }
+                        ForEach(model.availableModels.filter { $0.type == "llm" }) { item in Text("\(item.displayName)\(item.loadedInstances.isEmpty ? "" : " · 已加载")").tag(item.key) }
+                    }
+                    Picker("翻译模型", selection: $model.settings.translatorModel) {
+                        if model.availableModels.isEmpty { Text(model.settings.translatorModel).tag(model.settings.translatorModel) }
+                        ForEach(model.availableModels.filter { $0.type == "llm" }) { item in Text("\(item.displayName)\(item.loadedInstances.isEmpty ? "" : " · 已加载")").tag(item.key) }
+                    }
+                } else {
+                    LabeledContent("模型", value: "glm-5.3-flash")
+                    SecureField("GLM Coding Plan API Key", text: $credentialDraft)
+                    HStack {
+                        Label(
+                            model.providerCredentialStatus,
+                            systemImage: model.hasProviderCredential ? "key.fill" : (model.providerCredentialStatus.hasPrefix("Keychain 访问失败") ? "exclamationmark.triangle" : "key")
+                        )
+                        .foregroundStyle(model.providerCredentialStatus.hasPrefix("Keychain 访问失败") ? .red : .secondary)
+                        Spacer()
+                        Button("保存到 Keychain") {
+                            let value = credentialDraft
+                            credentialDraft = ""
+                            Task { await model.saveProviderCredential(value) }
+                        }.disabled(credentialDraft.isEmpty)
+                        if model.hasProviderCredential {
+                            Button("移除") { Task { await model.clearProviderCredential() } }
+                        }
+                    }
+                    Text("凭据仅保存在 macOS Keychain，不写入设置文件或运行日记。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 HStack {
                     Label(model.connectionText, systemImage: model.connectionText.hasPrefix("已连接") ? "checkmark.circle.fill" : "network")
                         .foregroundStyle(model.connectionText.hasPrefix("已连接") ? .green : .secondary)
                     Spacer()
-                    Button("测试连接并刷新模型") { Task { await model.connect() } }.disabled(model.isConnecting)
+                    Button(model.settings.provider == .glmCodingPlan ? "测试 GLM 连接" : "测试连接并刷新模型") { Task { await model.connect() } }.disabled(model.isConnecting)
                 }
             }
             Section("模型参数") {
-                Picker("模型调度", selection: $model.settings.modelStrategy) { Text("交换模型（节省内存）").tag(ModelStrategy.swap); Text("两个模型常驻").tag(ModelStrategy.keep) }
-                Picker("主控思考强度", selection: $model.settings.controllerReasoning) { ForEach(["low", "medium", "high"], id: \.self) { Text($0).tag($0) } }
-                LabeledContent("主控上下文") { Stepper("\(model.settings.controllerContext.formatted())", value: $model.settings.controllerContext, in: 32_768...65_536, step: 8_192) }
-                LabeledContent("翻译上下文") { Stepper("\(model.settings.translatorContext.formatted())", value: $model.settings.translatorContext, in: 32_768...65_536, step: 8_192) }
+                if model.settings.provider == .lmStudio {
+                    Picker("模型调度", selection: $model.settings.modelStrategy) { Text("交换模型（节省内存）").tag(ModelStrategy.swap); Text("两个模型常驻").tag(ModelStrategy.keep) }
+                    Picker("主控思考强度", selection: $model.settings.controllerReasoning) { ForEach(["low", "medium", "high"], id: \.self) { Text($0).tag($0) } }
+                }
+                let maxContext = model.settings.provider == .glmCodingPlan ? 1_000_000 : 65_536
+                LabeledContent("主控上下文") { Stepper("\(model.settings.controllerContext.formatted())", value: $model.settings.controllerContext, in: 32_768...maxContext, step: 8_192) }
+                LabeledContent("翻译上下文") { Stepper("\(model.settings.translatorContext.formatted())", value: $model.settings.translatorContext, in: 32_768...maxContext, step: 8_192) }
                 LabeledContent("主控温度") { Slider(value: $model.settings.controllerTemperature, in: 0...1, step: 0.1).frame(maxWidth: 260); Text(model.settings.controllerTemperature.formatted(.number.precision(.fractionLength(1)))) }
-                LabeledContent("翻译温度") { Slider(value: $model.settings.translatorTemperature, in: 0...0.5, step: 0.1).frame(maxWidth: 260); Text(model.settings.translatorTemperature.formatted(.number.precision(.fractionLength(1)))) }
+                LabeledContent("翻译温度") { Slider(value: $model.settings.translatorTemperature, in: 0...(model.settings.provider == .glmCodingPlan ? 1 : 0.5), step: 0.1).frame(maxWidth: 260); Text(model.settings.translatorTemperature.formatted(.number.precision(.fractionLength(1)))) }
             }
             Section("翻译流程") {
                 LabeledContent("新任务片段上限") { Stepper("\(model.settings.maxChunkCharacters.formatted()) 字", value: $model.settings.maxChunkCharacters, in: 2_000...16_384, step: 512) }
@@ -936,7 +1199,6 @@ struct SettingsView: View {
                 LabeledContent("批次大小") { Stepper("\(model.settings.batchSize)", value: $model.settings.batchSize, in: 2...4) }
                 LabeledContent("通过分数") { Stepper("\(model.settings.passScore)", value: $model.settings.passScore, in: 0...100, step: 5) }
                 LabeledContent("最大重试次数") { Stepper("\(model.settings.maxRetries)", value: $model.settings.maxRetries, in: 0...5) }
-                LabeledContent("大纲抽样窗口") { Stepper("\(model.settings.overviewMaxWindows)", value: $model.settings.overviewMaxWindows, in: 1...8) }
                 Picker("记忆上限", selection: $model.settings.memoryMaxCharacters) { Text("1024 字").tag(1_024); Text("2048 字").tag(2_048) }
                 LabeledContent("概述长度上限") { Stepper("\(model.settings.summaryMaxCharacters) 字", value: $model.settings.summaryMaxCharacters, in: 40...500, step: 20) }
                 Toggle("大纲生成后暂停，等待确认", isOn: $model.settings.pauseAfterOverview)

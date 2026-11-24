@@ -37,7 +37,7 @@ public struct URLSessionTransport: LMStudioTransport {
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     let code = (response as? HTTPURLResponse)?.statusCode ?? 0
                     guard (200..<300).contains(code) else {
-                        throw LMStudioError.http(status: code, message: "LM Studio returned HTTP \(code).")
+                        throw LMStudioError.http(status: code, message: "Model provider returned HTTP \(code).")
                     }
                     var lineBytes: [UInt8] = []
                     var dataLines: [String] = []
@@ -92,18 +92,21 @@ public enum LMStudioError: Error, LocalizedError, Sendable {
     case invalidBaseURL
     case insecureBaseURL
     case http(status: Int, message: String)
-    case emptyCompletion
+    case emptyCompletion(provider: String, model: String, finishReason: String?, promptEstimate: Int, contextLength: Int, maxTokens: Int, promptTokens: Int, completionTokens: Int, reasoningCharacters: Int)
+    case providerStreamError(String)
     case insufficientContext(required: Int, available: Int)
     case invalidResponse
 
     public var errorDescription: String? {
         switch self {
-        case .invalidBaseURL: return "Enter a valid LM Studio server URL."
-        case .insecureBaseURL: return "Use HTTPS for remote LM Studio servers; plaintext HTTP is limited to loopback."
-        case .http(let status, let message): return "LM Studio HTTP \(status): \(message)"
-        case .emptyCompletion: return "The model returned no text."
+        case .invalidBaseURL: return "Enter a valid model provider URL."
+        case .insecureBaseURL: return "Use HTTPS for remote model providers; plaintext HTTP is limited to loopback."
+        case .http(let status, let message): return "Model provider HTTP \(status): \(message)"
+        case .emptyCompletion(let provider, let model, let finishReason, let promptEstimate, let contextLength, let maxTokens, let promptTokens, let completionTokens, let reasoningCharacters):
+            return "\(provider) model \(model) returned no text (finish_reason=\(finishReason ?? "unknown"), prompt_estimate=\(promptEstimate), context_length=\(contextLength), max_tokens=\(maxTokens), prompt_tokens=\(promptTokens), completion_tokens=\(completionTokens), reasoning_characters=\(reasoningCharacters))."
+        case .providerStreamError(let message): return "Model provider stream error: \(message)"
         case .insufficientContext(let required, let available): return "The prompt requires about \(required) tokens, but the context budget is \(available). Reduce the chunk size or increase the context length."
-        case .invalidResponse: return "LM Studio returned an unreadable response."
+        case .invalidResponse: return "The model provider returned an unreadable response."
         }
     }
 }
@@ -124,6 +127,13 @@ public struct LMStudioModel: Decodable, Identifiable, Sendable {
     public var type: String
     public var loadedInstances: [LoadedModelInstance]
     public var id: String { key }
+
+    public init(key: String, displayName: String, type: String = "llm", loadedInstances: [LoadedModelInstance] = []) {
+        self.key = key
+        self.displayName = displayName
+        self.type = type
+        self.loadedInstances = loadedInstances
+    }
 
     enum CodingKeys: String, CodingKey {
         case key, type
@@ -159,15 +169,18 @@ public struct ChatResult: Sendable {
 public struct LMStudioClient: Sendable {
     public var baseURL: String
     public var apiToken: String
+    public var provider: ModelProvider
     private let transport: any LMStudioTransport
 
-    public init(baseURL: String, apiToken: String = "", transport: any LMStudioTransport = URLSessionTransport()) {
+    public init(baseURL: String, apiToken: String = "", provider: ModelProvider = .lmStudio, transport: any LMStudioTransport = URLSessionTransport()) {
         self.baseURL = baseURL
         self.apiToken = apiToken
+        self.provider = provider
         self.transport = transport
     }
 
     public func models() async throws -> [LMStudioModel] {
+        guard provider == .lmStudio else { return [LMStudioModel(key: "glm-5.3-flash", displayName: "GLM-5.3-Flash")] }
         let response = try await request(path: "/api/v1/models", method: "GET")
         struct ModelList: Decodable { var models: [LMStudioModel] }
         return try JSONDecoder().decode(ModelList.self, from: response.data).models
@@ -175,12 +188,14 @@ public struct LMStudioClient: Sendable {
 
     @discardableResult
     public func load(model: String, contextLength: Int) async throws -> String {
+        guard provider == .lmStudio else { return model }
         let response = try await request(path: "/api/v1/models/load", method: "POST", body: ["model": model, "context_length": contextLength])
         struct LoadResult: Decodable { var instanceID: String; enum CodingKeys: String, CodingKey { case instanceID = "instance_id" } }
         return try JSONDecoder().decode(LoadResult.self, from: response.data).instanceID
     }
 
     public func unload(instanceID: String) async throws {
+        guard provider == .lmStudio else { return }
         _ = try await request(path: "/api/v1/models/unload", method: "POST", body: ["instance_id": instanceID])
     }
 
@@ -206,12 +221,20 @@ public struct LMStudioClient: Sendable {
             ],
             "temperature": temperature,
             "max_tokens": boundedTokens,
-            "stream": true,
-            "stream_options": ["include_usage": true]
+            "stream": true
         ]
-        if let reasoningEffort { body["reasoning_effort"] = reasoningEffort }
-        if let responseSchema { body["response_format"] = ["type": "json_schema", "json_schema": responseSchema] }
-        let request = try makeRequest(path: "/v1/chat/completions", method: "POST", body: body)
+        let chatPath: String
+        if provider == .lmStudio {
+            body["stream_options"] = ["include_usage": true]
+            if let reasoningEffort { body["reasoning_effort"] = reasoningEffort }
+            if let responseSchema { body["response_format"] = ["type": "json_schema", "json_schema": responseSchema] }
+            chatPath = "/v1/chat/completions"
+        } else {
+            body["thinking"] = ["type": "enabled"]
+            if responseSchema != nil { body["response_format"] = ["type": "json_object"] }
+            chatPath = "chat/completions"
+        }
+        let request = try makeRequest(path: chatPath, method: "POST", body: body)
         var content = ""
         var reasoning = ""
         var finishReason: String?
@@ -221,6 +244,23 @@ public struct LMStudioClient: Sendable {
             try Task.checkCancellation()
             if event == "[DONE]" { break }
             guard let data = event.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            if let providerError = object["error"] {
+                let errorObject = providerError as? [String: Any] ?? [:]
+                var details: [String] = []
+                if let type = errorObject["type"] as? String,
+                   type.range(of: "^[A-Za-z0-9_.-]{1,80}$", options: .regularExpression) != nil {
+                    details.append("type=\(type)")
+                }
+                if let code = errorObject["code"] as? NSNumber {
+                    details.append("code=\(code.stringValue)")
+                } else if let code = errorObject["code"] as? String,
+                          code.range(of: "^[A-Za-z0-9_.-]{1,32}$", options: .regularExpression) != nil {
+                    details.append("code=\(code)")
+                }
+                let providerName = provider == .glmCodingPlan ? "GLM Coding Plan" : "LM Studio"
+                let summary = "\(providerName) model \(sanitizedDiagnostic(model)) returned an SSE error object"
+                throw LMStudioError.providerStreamError(details.isEmpty ? summary : "\(summary) (\(details.joined(separator: ", "))).")
+            }
             if let usage = object["usage"] as? [String: Any] {
                 promptTokens = usage["prompt_tokens"] as? Int ?? promptTokens
                 completionTokens = usage["completion_tokens"] as? Int ?? completionTokens
@@ -239,17 +279,43 @@ public struct LMStudioClient: Sendable {
             }
         }
         try Task.checkCancellation()
-        if content.isEmpty { throw LMStudioError.emptyCompletion }
+        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let providerName = provider == .glmCodingPlan ? "GLM Coding Plan" : "LM Studio"
+            throw LMStudioError.emptyCompletion(
+                provider: providerName,
+                model: sanitizedDiagnostic(model),
+                finishReason: finishReason.map(sanitizedDiagnostic),
+                promptEstimate: promptEstimate,
+                contextLength: contextLength,
+                maxTokens: boundedTokens,
+                promptTokens: promptTokens,
+                completionTokens: completionTokens,
+                reasoningCharacters: reasoning.count
+            )
+        }
         return ChatResult(content: content, reasoning: reasoning, finishReason: finishReason, promptTokens: promptTokens, completionTokens: completionTokens)
     }
 
-    public func testConnection() async throws -> [LMStudioModel] { try await models() }
+    public func testConnection() async throws -> [LMStudioModel] {
+        guard provider == .glmCodingPlan else { return try await models() }
+        _ = try await chat(
+            model: "glm-5.3-flash",
+            prompt: ChatPrompt(system: "Reply with OK.", user: "Connection test."),
+            temperature: 1,
+            maxTokens: 16,
+            contextLength: 1_024,
+            reasoningEffort: "max"
+        )
+        return [LMStudioModel(key: "glm-5.3-flash", displayName: "GLM-5.3-Flash")]
+    }
 
     private func request(path: String, method: String, body: [String: Any]? = nil) async throws -> HTTPPayload {
         let request = try makeRequest(path: path, method: method, body: body)
         let response = try await transport.send(request)
         guard (200..<300).contains(response.statusCode) else {
-            let message = String(data: response.data, encoding: .utf8) ?? "Request failed"
+            var message = String(data: response.data, encoding: .utf8) ?? "Request failed"
+            if !apiToken.isEmpty { message = message.replacingOccurrences(of: apiToken, with: "[REDACTED]") }
+            message = WorkspaceDiaryStore.redact(message)
             throw LMStudioError.http(status: response.statusCode, message: message)
         }
         return response
@@ -259,9 +325,16 @@ public struct LMStudioClient: Sendable {
         guard let root = URL(string: baseURL),
               let scheme = root.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = root.host?.lowercased(),
-              root.user == nil, root.password == nil, root.query == nil, root.fragment == nil,
-              let url = URL(string: path, relativeTo: root)?.absoluteURL else { throw LMStudioError.invalidBaseURL }
+              root.user == nil, root.password == nil, root.query == nil, root.fragment == nil else { throw LMStudioError.invalidBaseURL }
         guard scheme == "https" || Self.isLoopbackHost(host) else { throw LMStudioError.insecureBaseURL }
+        guard var components = URLComponents(url: root, resolvingAgainstBaseURL: false) else { throw LMStudioError.invalidBaseURL }
+        if provider == .glmCodingPlan {
+            let prefix = components.path.hasSuffix("/") ? String(components.path.dropLast()) : components.path
+            components.path = prefix + "/" + path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        } else {
+            components.path = path
+        }
+        guard let url = components.url else { throw LMStudioError.invalidBaseURL }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 120
@@ -285,10 +358,16 @@ public struct LMStudioClient: Sendable {
     private func estimateTokens(_ text: String) -> Int {
         TranslationTextMetrics.estimatedTokens(text)
     }
+
+    private func sanitizedDiagnostic(_ value: String) -> String {
+        let withoutCredential = apiToken.isEmpty ? value : value.replacingOccurrences(of: apiToken, with: "[REDACTED]")
+        return WorkspaceDiaryStore.redact(withoutCredential)
+    }
 }
 
 public enum ModelScheduler {
     public static func prepare(role: String, settings: AppSettings, client: LMStudioClient) async throws {
+        guard settings.provider == .lmStudio else { return }
         let isController = role == "controller"
         let requestedModel = isController ? settings.controllerModel : settings.translatorModel
         let contextLength = isController ? settings.controllerContext : settings.translatorContext

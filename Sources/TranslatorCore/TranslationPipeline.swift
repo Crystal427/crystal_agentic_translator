@@ -1,20 +1,41 @@
 import Foundation
+import CryptoKit
 
 public enum TranslationPipelineError: Error, LocalizedError {
     case missingJob
     case noSourceText
     case missingGuide
+    case plannerContextExceeded
 
     public var errorDescription: String? {
         switch self {
         case .missingJob: return "The translation task could not be found."
         case .noSourceText: return "Add at least one non-empty text file."
         case .missingGuide: return "The outline could not be generated. Check the controller model and try again."
+        case .plannerContextExceeded: return "The accumulated translation guide leaves no safe context for the next planning window. Reduce the guide or increase the controller context."
         }
     }
 }
 
+enum TranslationOutputBudget {
+        static func maxTokens(source: String, provider: ModelProvider) -> Int {
+            let contentTokens = max(1_024, TranslationTextMetrics.estimatedTokens(source) * 2 + 512)
+            guard provider == .glmCodingPlan else { return contentTokens }
+            return contentTokens + max(12_288, contentTokens)
+        }
+}
+
 public struct TranslationPipeline: Sendable {
+    private struct PlannerWindow {
+        var text: String
+        var fileIndex: Int
+        var fileName: String
+        var startOffset: Int
+        var endOffset: Int
+        var sections: [DocumentSection]
+        var outputReservation: Int
+    }
+
     private let store: JobStore
     private let client: LMStudioClient
 
@@ -26,26 +47,37 @@ public struct TranslationPipeline: Sendable {
     public func createJob(name: String, sources: [SourceDocument], series: Bool, settings: AppSettings) async throws -> TranslationJob {
         var normalizedSources: [SourceDocument] = []
         var chunks: [TranslationChunk] = []
-        for (fileIndex, source) in sources.enumerated() {
+        var documentSections: [DocumentSection] = []
+        for source in sources {
             let normalized = TextProcessor.normalize(source.text)
             guard !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             let document = SourceDocument(id: source.id, name: source.name, text: normalized)
             normalizedSources.append(document)
+            let fileIndex = normalizedSources.count - 1
+            let sections = TextChunker.detectSections(fileIndex: fileIndex, fileName: source.name, text: normalized)
+            documentSections.append(contentsOf: sections)
             let fileChunks = TextChunker.makeChunks(
-                fileIndex: normalizedSources.count - 1,
+                fileIndex: fileIndex,
                 fileName: source.name,
                 text: normalized,
                 maxCharacters: settings.maxChunkCharacters,
                 contextCharacters: settings.contextCharacters
             )
+            var sourceOffset = 0
             for var chunk in fileChunks {
+                let chunkStart = sourceOffset
+                let chunkEnd = chunkStart + chunk.rawText.count
+                if let section = sections.first(where: { $0.startOffset < chunkEnd && $0.endOffset > chunkStart }) {
+                    chunk.sectionID = section.id
+                    chunk.sectionTitle = section.title
+                }
+                sourceOffset = chunkEnd
                 chunk.index = chunks.count
                 chunks.append(chunk)
             }
-            _ = fileIndex
         }
         guard !normalizedSources.isEmpty, !chunks.isEmpty else { throw TranslationPipelineError.noSourceText }
-        var job = TranslationJob(name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? normalizedSources[0].name : name, series: series, sourceFiles: normalizedSources, chunks: chunks)
+        var job = TranslationJob(name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? normalizedSources[0].name : name, series: series, sourceFiles: normalizedSources, chunks: chunks, sections: documentSections)
         job.updatedAt = .now
         try await store.save(job)
         return job
@@ -100,10 +132,11 @@ public struct TranslationPipeline: Sendable {
             return job
         } catch {
             job.status = .failed
-            job.error = error.localizedDescription
+            let safeError = WorkspaceDiaryStore.redact(error.localizedDescription)
+            job.error = safeError
             job.updatedAt = .now
             try await store.save(job)
-            onEvent(.log(jobID: jobID, message: error.localizedDescription))
+            onEvent(.log(jobID: jobID, message: safeError))
             throw error
         }
     }
@@ -151,31 +184,95 @@ public struct TranslationPipeline: Sendable {
 
     private func generateGuide(for job: inout TranslationJob, settings: AppSettings, onEvent: @escaping @Sendable (PipelineEvent) -> Void) async throws {
         let allText = job.sourceFiles.map(\.text).joined(separator: "\n\n")
-        let windows = overviewWindows(allText, settings: settings)
+        let sourceDigest = digest(job.sourceFiles.map { "\($0.name)\u{0}\($0.text)" }.joined(separator: "\u{0}"))
+        let configurationDigest = digest([
+            settings.provider.rawValue, settings.controllerModel, String(settings.controllerContext),
+            settings.controllerReasoning, String(settings.controllerTemperature), settings.targetLanguage,
+            settings.genre, settings.extraInstructions
+        ].joined(separator: "\u{0}"))
+        var checkpoint = job.plannerCheckpoint
+        if checkpoint?.sourceDigest != sourceDigest || checkpoint?.configurationDigest != configurationDigest {
+            checkpoint = nil
+        }
         try await ModelScheduler.prepare(role: "controller", settings: settings, client: client)
-        var guide: TranslationGuide?
-        for (index, window) in windows.enumerated() {
+        var guide = checkpoint?.mergedGuide
+        var completedWindows = checkpoint?.completedWindows ?? []
+        let firstFile = min(max(0, checkpoint?.nextFileIndex ?? 0), job.sourceFiles.count)
+        for fileIndex in firstFile..<job.sourceFiles.count {
             try Task.checkCancellation()
-            onEvent(.activity(jobID: job.id, role: "主控", action: "生成翻译大纲（窗口 \(index + 1)/\(windows.count)）"))
-            let prompt = PromptBuilder.planner(text: window, windowIndex: index + 1, windowCount: windows.count, existing: guide, settings: settings)
-            let parsed = try await requestJSON(
-                TranslationGuide.self,
-                prompt: prompt,
-                model: settings.controllerModel,
-                temperature: settings.controllerTemperature,
-                maxTokens: 8_000,
-                contextLength: settings.controllerContext,
-                reasoningEffort: settings.controllerReasoning,
-                schema: Schemas.guide,
-                jobID: job.id,
-                role: "主控",
-                onEvent: onEvent
-            )
-            job.totalTokens += parsed.promptTokens + parsed.completionTokens
-            job.controllerTokens += parsed.promptTokens + parsed.completionTokens
-            let current = parsed.value
-            guide = mergeGuide(existing: guide, update: current, source: window)
-            try await store.save(job)
+            let file = job.sourceFiles[fileIndex]
+            let characters = Array(file.text)
+            var offset = fileIndex == firstFile ? min(max(0, checkpoint?.nextOffset ?? 0), characters.count) : 0
+            while offset < characters.count {
+                try Task.checkCancellation()
+                let windowIndex = completedWindows.count + 1
+                let window = try plannerWindow(
+                    fileIndex: fileIndex,
+                    fileName: file.name,
+                    characters: characters,
+                    startOffset: offset,
+                    existing: guide,
+                    sections: (job.sections ?? []).filter { $0.fileIndex == fileIndex },
+                    windowIndex: windowIndex,
+                    settings: settings
+                )
+                let sectionLabel = window.sections.map(\.title).filter { !$0.isEmpty }.joined(separator: "、")
+                onEvent(.activity(jobID: job.id, role: "主控", action: "通读并细化第 \(windowIndex) 个窗口 · \(file.name)\(sectionLabel.isEmpty ? "" : " · \(sectionLabel)" )"))
+                let prompt = PromptBuilder.planner(
+                    text: window.text,
+                    windowIndex: windowIndex,
+                    existing: guide,
+                    settings: settings,
+                    fileName: file.name,
+                    sections: window.sections
+                )
+                let parsed = try await requestJSON(
+                    TranslationGuide.self,
+                    prompt: prompt,
+                    model: settings.controllerModel,
+                    temperature: settings.controllerTemperature,
+                    maxTokens: window.outputReservation,
+                    contextLength: settings.controllerContext,
+                    reasoningEffort: settings.controllerReasoning,
+                    schema: Schemas.guide,
+                    jobID: job.id,
+                    role: "主控",
+                    onEvent: onEvent
+                )
+                job.totalTokens += parsed.promptTokens + parsed.completionTokens
+                job.controllerTokens += parsed.promptTokens + parsed.completionTokens
+                let updatedGuide = mergeGuide(existing: guide, update: parsed.value, source: window.text, sectionIDs: Set(window.sections.map(\.id)))
+                let evidence = PlannerWindowEvidence(
+                    id: "\(fileIndex):\(window.startOffset)-\(window.endOffset)",
+                    fileIndex: fileIndex,
+                    fileName: file.name,
+                    startOffset: window.startOffset,
+                    endOffset: window.endOffset,
+                    sectionIDs: window.sections.map(\.id),
+                    sourceDigest: digest(window.text)
+                )
+                completedWindows.append(evidence)
+                guide = updatedGuide
+                let nextFile = window.endOffset == characters.count ? fileIndex + 1 : fileIndex
+                let nextOffset = nextFile == fileIndex ? window.endOffset : 0
+                checkpoint = PlannerCheckpoint(
+                    sourceDigest: sourceDigest,
+                    configurationDigest: configurationDigest,
+                    nextFileIndex: nextFile,
+                    nextOffset: nextOffset,
+                    mergedGuide: updatedGuide,
+                    completedWindows: completedWindows
+                )
+                job.plannerCheckpoint = checkpoint
+                storeAgentSnapshot(
+                    AgentOutputSnapshot(role: "planner", windowIndex: windowIndex, rawJSON: parsed.rawJSON, structuredJSON: parsed.structuredJSON),
+                    in: &job
+                )
+                job.updatedAt = .now
+                try await store.save(job)
+                onEvent(.snapshot(jobID: job.id, role: "主控"))
+                offset = window.endOffset
+            }
         }
         guard var finalGuide = guide else { throw TranslationPipelineError.missingGuide }
         if finalGuide.sourceLanguage.isEmpty || finalGuide.sourceLanguage == "auto" { finalGuide.sourceLanguage = detectLanguage(allText) }
@@ -184,6 +281,44 @@ public struct TranslationPipeline: Sendable {
         job.guide = finalGuide
         job.memory = emptyMemory
         try await store.save(job)
+    }
+
+    private func plannerWindow(fileIndex: Int, fileName: String, characters: [Character], startOffset: Int, existing: TranslationGuide?, sections: [DocumentSection], windowIndex: Int, settings: AppSettings) throws -> PlannerWindow {
+        let outputReservation = min(8_000, max(1_024, settings.controllerContext / 4))
+        var endOffset = min(characters.count, startOffset + max(1, settings.controllerContext / 2))
+        var windowSections: [DocumentSection] = []
+        for _ in 0..<8 {
+            windowSections = sections.filter { $0.isExplicit && $0.startOffset < endOffset && $0.endOffset > startOffset }
+            let emptyPrompt = PromptBuilder.planner(text: "", windowIndex: windowIndex, existing: existing, settings: settings, fileName: fileName, sections: windowSections)
+            let fixedTokens = estimateTokens(emptyPrompt.system + "\n" + emptyPrompt.user)
+            let sourceBudget = settings.controllerContext - fixedTokens - outputReservation - 512
+            guard sourceBudget > 0 else { throw TranslationPipelineError.plannerContextExceeded }
+            let candidateEnd = min(characters.count, startOffset + sourceBudget)
+            if candidateEnd >= endOffset { break }
+            endOffset = candidateEnd
+        }
+        guard endOffset > startOffset else { throw TranslationPipelineError.plannerContextExceeded }
+        let lowerBoundary = startOffset + max(1, (endOffset - startOffset) * 3 / 4)
+        if lowerBoundary < endOffset, let newline = (lowerBoundary..<endOffset).last(where: { characters[$0] == "\n" }) {
+            endOffset = newline + 1
+        }
+        windowSections = sections.filter { $0.isExplicit && $0.startOffset < endOffset && $0.endOffset > startOffset }
+        let text = String(characters[startOffset..<endOffset])
+        let prompt = PromptBuilder.planner(text: text, windowIndex: windowIndex, existing: existing, settings: settings, fileName: fileName, sections: windowSections)
+        let promptTokens = estimateTokens(prompt.system + "\n" + prompt.user)
+        guard promptTokens + outputReservation + 256 <= settings.controllerContext else { throw TranslationPipelineError.plannerContextExceeded }
+        return PlannerWindow(text: text, fileIndex: fileIndex, fileName: fileName, startOffset: startOffset, endOffset: endOffset, sections: windowSections, outputReservation: outputReservation)
+    }
+
+    private func digest(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func storeAgentSnapshot(_ snapshot: AgentOutputSnapshot, in job: inout TranslationJob) {
+        var snapshots = job.agentOutputSnapshots ?? []
+        snapshots.removeAll { $0.role == snapshot.role }
+        snapshots.append(snapshot)
+        job.agentOutputSnapshots = snapshots
     }
 
     private func scout(batch: [Int], job: inout TranslationJob, settings: AppSettings, onEvent: @escaping @Sendable (PipelineEvent) -> Void) async throws {
@@ -208,13 +343,14 @@ public struct TranslationPipeline: Sendable {
                 reasoningEffort: settings.controllerReasoning,
                 schema: Schemas.scout(summaryLimit: settings.summaryMaxCharacters, memoryLimit: settings.memoryMaxCharacters),
                 jobID: job.id,
-                role: "主控",
+                role: "预读",
                 onEvent: onEvent
             )
             job.totalTokens += parsed.promptTokens + parsed.completionTokens
             job.controllerTokens += parsed.promptTokens + parsed.completionTokens
             let result = parsed.value
             chunk.summary = String(result.summary.prefix(settings.summaryMaxCharacters))
+            storeAgentSnapshot(AgentOutputSnapshot(role: "scout", chunkIndex: chunk.index, rawJSON: parsed.rawJSON, structuredJSON: parsed.structuredJSON), in: &job)
             chunk.translationNotes = Array(result.translationNotes.prefix(3)).map { String($0.prefix(60)) }
             chunk.status = .scouted
             job.chunks[index] = chunk
@@ -227,6 +363,7 @@ public struct TranslationPipeline: Sendable {
             job.memoryHistory.append(MemorySnapshot(afterChunk: chunk.index, text: job.memory))
             job.updatedAt = .now
             try await store.save(job)
+            onEvent(.snapshot(jobID: job.id, role: "预读"))
             onEvent(.chunk(jobID: job.id, chunkIndex: chunk.index))
         }
     }
@@ -266,7 +403,7 @@ public struct TranslationPipeline: Sendable {
                             model: settings.translatorModel,
                             prompt: prompt,
                             temperature: temperature,
-                            maxTokens: max(1_024, estimateTokens(chunk.source) * 2 + 512),
+                            maxTokens: TranslationOutputBudget.maxTokens(source: chunk.source, provider: settings.provider),
                             contextLength: settings.translatorContext,
                             reasoningEffort: "none",
                             onDelta: streamHandler(jobID: job.id, role: "翻译模型", onEvent: onEvent)
@@ -293,7 +430,7 @@ public struct TranslationPipeline: Sendable {
                 guard let attemptIndex = chunk.attempts.indices.last else { continue }
                 let attempt = chunk.attempts[attemptIndex]
                 job.chunks[index].status = .reviewing
-                onEvent(.activity(jobID: job.id, role: "主控", action: "评审第 \(chunk.index + 1)/\(job.chunks.count) 个片段"))
+                onEvent(.activity(jobID: job.id, role: "审校", action: "评审第 \(chunk.index + 1)/\(job.chunks.count) 个片段"))
                 let previous = previousTranslation(for: chunk, in: job)
                 let guide = job.guide ?? TranslationGuide()
                 let report = TranslationQuality.inspect(
@@ -321,12 +458,13 @@ public struct TranslationPipeline: Sendable {
                             reasoningEffort: settings.controllerReasoning,
                             schema: Schemas.reviewer,
                             jobID: job.id,
-                            role: "主控",
+                            role: "审校",
                             onEvent: onEvent
                         )
                         job.totalTokens += parsed.promptTokens + parsed.completionTokens
                         job.controllerTokens += parsed.promptTokens + parsed.completionTokens
                         let payload = parsed.value
+                        storeAgentSnapshot(AgentOutputSnapshot(role: "reviewer", chunkIndex: chunk.index, rawJSON: parsed.rawJSON, structuredJSON: parsed.structuredJSON), in: &job)
                         let score = max(0, min(100, payload.scores.weighted - report.penalty))
                         review = TranslationReview(
                             scores: payload.scores,
@@ -368,6 +506,7 @@ public struct TranslationPipeline: Sendable {
                 }
                 job.updatedAt = .now
                 try await store.save(job)
+                onEvent(.snapshot(jobID: job.id, role: "审校"))
                 onEvent(.chunk(jobID: job.id, chunkIndex: chunk.index))
             }
             remaining = retry
@@ -431,7 +570,7 @@ public struct TranslationPipeline: Sendable {
                 model: settings.translatorModel,
                 prompt: prompt,
                 temperature: 0.3,
-                maxTokens: max(1_024, estimateTokens(part.source) * 2 + 512),
+                maxTokens: TranslationOutputBudget.maxTokens(source: part.source, provider: settings.provider),
                 contextLength: settings.translatorContext,
                 reasoningEffort: "none",
                 onDelta: streamHandler(jobID: jobID, role: "翻译模型", onEvent: onEvent)
@@ -467,41 +606,75 @@ public struct TranslationPipeline: Sendable {
         { kind, text in onEvent(.stream(jobID: jobID, role: role, kind: kind, text: text)) }
     }
 
-    private func overviewWindows(_ text: String, settings: AppSettings) -> [String] {
-        let available = max(2_000, settings.controllerContext - 12_000)
-        if estimateTokens(text) <= available { return [text] }
-        let windowSize = max(2_000, min(available, settings.controllerContext / 3))
-        let count = min(settings.overviewMaxWindows, max(1, Int(ceil(Double(text.count) / Double(windowSize)))))
-        if count == 1 { return [String(text.prefix(windowSize))] }
-        let characters = Array(text)
-        return (0..<count).map { index in
-            let start = index == 0 ? 0 : (characters.count - windowSize) * index / (count - 1)
-            let end = min(characters.count, start + windowSize)
-            return String(characters[start..<end])
-        }
-    }
-
-    private func mergeGuide(existing: TranslationGuide?, update: TranslationGuide, source: String) -> TranslationGuide {
+    private func mergeGuide(existing: TranslationGuide?, update: TranslationGuide, source: String, sectionIDs: Set<String>) -> TranslationGuide {
         var result = existing ?? update
-        result.titleZh = update.titleZh.isEmpty ? result.titleZh : update.titleZh
-        result.sourceLanguage = update.sourceLanguage.isEmpty ? result.sourceLanguage : update.sourceLanguage
+        result.titleZh = firstNonempty(result.titleZh, update.titleZh)
+        result.sourceLanguage = firstNonempty(result.sourceLanguage, update.sourceLanguage)
         result.genre = update.genre.isEmpty ? result.genre : update.genre
-        result.synopsis = update.synopsis.isEmpty ? result.synopsis : update.synopsis
-        result.style = update.style
-        result.rules = update.rules.isEmpty ? result.rules : update.rules
-        let characters = existing?.characters ?? []
-        result.characters = characters
+        result.synopsis = mergeDistinctText(result.synopsis, update.synopsis)
+        result.style = TranslationStyle(
+            narration: mergeDistinctText(result.style.narration, update.style.narration),
+            tone: mergeDistinctText(result.style.tone, update.style.tone),
+            diction: mergeDistinctText(result.style.diction, update.style.diction),
+            dialogue: mergeDistinctText(result.style.dialogue, update.style.dialogue),
+            punctuation: mergeDistinctText(result.style.punctuation, update.style.punctuation)
+        )
+        for rule in update.rules where !rule.isEmpty && !result.rules.contains(rule) { result.rules.append(rule) }
         for character in update.characters where !character.source.isEmpty && containsSource(character.source, in: source) {
-            guard !result.characters.contains(where: { $0.source.caseInsensitiveCompare(character.source) == .orderedSame }) else { continue }
-            result.characters.append(character)
+            guard let index = result.characters.firstIndex(where: { $0.source.caseInsensitiveCompare(character.source) == .orderedSame }) else {
+                var newCharacter = character
+                newCharacter.aliases = character.aliases.filter { containsSource($0.source, in: source) }
+                result.characters.append(newCharacter)
+                continue
+            }
+            var stored = result.characters[index]
+            if stored.target.isEmpty { stored.target = character.target }
+            if stored.gender == "未知" && character.gender != "未知" { stored.gender = character.gender }
+            stored.role = mergeDistinctText(stored.role, character.role)
+            stored.voice = mergeDistinctText(stored.voice, character.voice)
+            for alias in character.aliases where containsSource(alias.source, in: source) {
+                if let aliasIndex = stored.aliases.firstIndex(where: { $0.source.caseInsensitiveCompare(alias.source) == .orderedSame }) {
+                    if stored.aliases[aliasIndex].target.isEmpty { stored.aliases[aliasIndex].target = alias.target }
+                } else {
+                    stored.aliases.append(alias)
+                }
+            }
+            result.characters[index] = stored
         }
-        let terms = existing?.terms ?? []
-        result.terms = terms
         for term in update.terms where !term.source.isEmpty && containsSource(term.source, in: source) {
-            guard !result.terms.contains(where: { $0.source.caseInsensitiveCompare(term.source) == .orderedSame }) else { continue }
-            result.terms.append(term)
+            guard let index = result.terms.firstIndex(where: { $0.source.caseInsensitiveCompare(term.source) == .orderedSame }) else {
+                result.terms.append(term)
+                continue
+            }
+            if result.terms[index].target.isEmpty { result.terms[index].target = term.target }
+            if result.terms[index].category == "其他" && term.category != "其他" { result.terms[index].category = term.category }
+            result.terms[index].note = mergeDistinctText(result.terms[index].note, term.note)
+        }
+        for section in update.sections where sectionIDs.contains(section.sectionID) && !section.evidence.isEmpty && source.contains(section.evidence) {
+            guard let index = result.sections.firstIndex(where: { $0.sectionID == section.sectionID }) else {
+                result.sections.append(section)
+                continue
+            }
+            result.sections[index].sourceTitle = firstNonempty(result.sections[index].sourceTitle, section.sourceTitle)
+            result.sections[index].sectionType = mergeDistinctText(result.sections[index].sectionType, section.sectionType)
+            result.sections[index].summary = mergeDistinctText(result.sections[index].summary, section.summary)
+            result.sections[index].evidence = mergeDistinctText(result.sections[index].evidence, section.evidence)
         }
         return result
+    }
+
+    private func firstNonempty(_ existing: String, _ update: String) -> String {
+        existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? update : existing
+    }
+
+    private func mergeDistinctText(_ existing: String, _ update: String) -> String {
+        let oldValue = existing.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newValue = update.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newValue.isEmpty else { return existing }
+        guard !oldValue.isEmpty else { return update }
+        if oldValue == newValue || oldValue.contains(newValue) { return existing }
+        if newValue.contains(oldValue) { return update }
+        return existing + "\n" + update
     }
 
     private func mergeNewTerms(_ terms: [GlossaryEntry], source: String, into job: inout TranslationJob) {
@@ -537,7 +710,7 @@ public struct TranslationPipeline: Sendable {
         return try JSONDecoder().decode(type, from: data)
     }
 
-    private func requestJSON<T: Decodable>(
+    private func requestJSON<T: Codable>(
         _ type: T.Type,
         prompt: ChatPrompt,
         model: String,
@@ -549,7 +722,7 @@ public struct TranslationPipeline: Sendable {
         jobID: UUID,
         role: String,
         onEvent: @escaping @Sendable (PipelineEvent) -> Void
-    ) async throws -> (value: T, promptTokens: Int, completionTokens: Int) {
+    ) async throws -> (value: T, promptTokens: Int, completionTokens: Int, rawJSON: String, structuredJSON: String) {
         var retryPrompt = prompt
         var promptTokens = 0
         var completionTokens = 0
@@ -569,7 +742,11 @@ public struct TranslationPipeline: Sendable {
                 promptTokens += response.promptTokens
                 completionTokens += response.completionTokens
                 do {
-                    return (try decode(type, response.content), promptTokens, completionTokens)
+                    let value = try decode(type, response.content)
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+                    let structuredJSON = String(decoding: try encoder.encode(value), as: UTF8.self)
+                    return (value, promptTokens, completionTokens, response.content, structuredJSON)
                 } catch {
                     lastError = error
                     if attempt < 2 {
@@ -580,6 +757,9 @@ public struct TranslationPipeline: Sendable {
                 throw CancellationError()
             } catch {
                 if Task.isCancelled { throw CancellationError() }
+                if case LMStudioError.http(let status, _) = error, status == 401 || status == 403 { throw error }
+                if case LMStudioError.emptyCompletion = error { throw error }
+                if case LMStudioError.providerStreamError = error { throw error }
                 lastError = error
                 if attempt < 2 { retryPrompt.user += "\n请重试上一个任务并只输出要求的结果。" }
             }
@@ -622,9 +802,12 @@ private enum Schemas {
                 "style": ["type": "object", "properties": ["narration": string, "tone": string, "diction": string, "dialogue": string, "punctuation": string], "required": ["narration", "tone", "diction", "dialogue", "punctuation"], "additionalProperties": false],
                 "characters": ["type": "array", "items": ["type": "object", "properties": ["source": string, "target": string, "gender": ["type": "string", "enum": ["男", "女", "未知"]], "role": string, "voice": string, "aliases": ["type": "array", "items": ["type": "object", "properties": ["source": string, "target": string], "required": ["source", "target"], "additionalProperties": false]]], "required": ["source", "target", "gender", "role", "voice", "aliases"], "additionalProperties": false]],
                 "terms": termArray,
-                "rules": ["type": "array", "items": string, "minItems": 3, "maxItems": 8]
+                "rules": ["type": "array", "items": string, "minItems": 3, "maxItems": 8],
+                "sections": ["type": "array", "items": ["type": "object", "properties": [
+                    "section_id": string, "source_title": string, "section_type": string, "summary": string, "evidence": string
+                ], "required": ["section_id", "source_title", "section_type", "summary", "evidence"], "additionalProperties": false]]
             ],
-            "required": ["title_zh", "source_language", "genre", "synopsis", "style", "characters", "terms", "rules"],
+            "required": ["title_zh", "source_language", "genre", "synopsis", "style", "characters", "terms", "rules", "sections"],
             "additionalProperties": false
         ]
     ]

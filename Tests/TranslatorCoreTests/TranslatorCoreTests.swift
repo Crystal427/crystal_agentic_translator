@@ -70,6 +70,24 @@ final class TextProcessingTests: XCTestCase {
         XCTAssertGreaterThan(chunks.count, 1)
         XCTAssertTrue(chunks.allSatisfy { $0.previousTail.isEmpty && $0.nextHead.isEmpty })
     }
+
+    func testExplicitJapaneseNightHeadingsRemainOrderedAndExposeMetadata() async throws {
+        let source = "前書き\n\n第一夜\n腕組みをして枕元に坐っていると\n\n第二夜\nその晩から\n"
+        let sections = TextChunker.detectSections(fileIndex: 0, fileName: "夢十夜.txt", text: source)
+        XCTAssertEqual(sections.map(\.title), ["前書き", "第一夜", "第二夜"])
+        XCTAssertEqual(sections.map(\.marker), ["前書き", "第一夜", "第二夜"])
+        XCTAssertEqual(sections.map(\.startOffset), sections.map(\.startOffset).sorted())
+        XCTAssertTrue(source[ source.index(source.startIndex, offsetBy: sections[1].startOffset)..<source.index(source.startIndex, offsetBy: sections[1].endOffset) ].hasPrefix("第一夜"))
+        let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "夢十夜.txt", text: source, maxCharacters: 100, contextCharacters: 0)
+        XCTAssertEqual(chunks.map(\.rawText).joined(), source)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pipeline = TranslationPipeline(store: JobStore(rootURL: root), client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: MockLMStudioTransport()))
+        let job = try await pipeline.createJob(name: "夢十夜", sources: [SourceDocument(name: "夢十夜.txt", text: source)], series: false, settings: AppSettings(maxChunkCharacters: 256))
+        XCTAssertEqual(job.sections?.map(\.title), sections.map(\.title))
+        XCTAssertTrue(job.chunks.contains { $0.sectionTitle == "第一夜" })
+        XCTAssertTrue(job.chunks.contains { $0.sectionTitle == "第二夜" })
+    }
 }
 
 final class JobModelOutputCacheTests: XCTestCase {
@@ -88,12 +106,14 @@ final class JobModelOutputCacheTests: XCTestCase {
         cache.append(jobID: secondJobID, role: "翻译模型", kind: "content", text: "译文 B")
         cache.setActivity(jobID: secondJobID, text: "评审第 2 段")
 
-        XCTAssertEqual(cache.output(for: firstJobID), JobModelOutput(activity: "翻译第 1 段", controllerReasoning: "推理", controllerOutput: "大纲", translator: "译文 A"))
+        XCTAssertEqual(cache.output(for: firstJobID), JobModelOutput(activity: "翻译第 1 段", controllerReasoning: "推理", controllerOutput: "大纲", isControllerOutputInProgress: true, translator: "译文 A"))
         XCTAssertEqual(cache.output(for: secondJobID), JobModelOutput(activity: "评审第 2 段", translator: "译文 B"))
+        XCTAssertTrue(cache.output(for: firstJobID).isControllerOutputInProgress)
         XCTAssertEqual(cache.activity(for: firstJobID, fallback: "已完成"), "翻译第 1 段")
         XCTAssertEqual(cache.activity(for: secondJobID, fallback: "已完成"), "评审第 2 段")
 
         cache.begin(jobID: firstJobID, role: "主控")
+        cache.completeController(jobID: firstJobID)
         XCTAssertEqual(cache.output(for: firstJobID), JobModelOutput(activity: "翻译第 1 段", translator: "译文 A"))
         cache.remove(jobID: firstJobID)
         XCTAssertEqual(cache.output(for: firstJobID), JobModelOutput())
@@ -372,6 +392,11 @@ final class PersistenceAndPipelineTests: XCTestCase {
         XCTAssertEqual(finished.completedCount, 1)
         XCTAssertEqual(finished.chunks[0].finalTranslation, "你好。")
         XCTAssertEqual(finished.chunks[0].attempts.first?.review?.score, 100)
+        XCTAssertEqual(Set((finished.agentOutputSnapshots ?? []).map(\.role)), Set(["planner", "scout", "reviewer"]))
+        XCTAssertTrue(finished.agentOutputSnapshots?.allSatisfy { !$0.rawJSON.isEmpty && !$0.structuredJSON.isEmpty } == true)
+        let persistedJob = try await store.loadJob(id: finished.id)
+        let persisted = try XCTUnwrap(persistedJob)
+        XCTAssertEqual(Set((persisted.agentOutputSnapshots ?? []).map(\.role)), Set(["planner", "scout", "reviewer"]))
         let output = await store.output(for: finished, fileIndex: 0)
         XCTAssertEqual(output, "你好。")
         let routes = transport.recordedRequests.map { $0.url?.path ?? "" }
@@ -693,6 +718,279 @@ final class PersistenceAndPipelineTests: XCTestCase {
     }
 }
 
+final class PlannerProviderSecurityAndDiaryTests: XCTestCase {
+    func testPlannerRefinesCompleteSourceAcrossBudgetedWindows() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = JobStore(rootURL: root)
+        let sourceText = String(repeating: "夢を見る。", count: 900)
+        var settings = AppSettings(controllerModel: "controller", translatorModel: "translator", controllerContext: 4_096, maxChunkCharacters: 12_000, pauseAfterOverview: true)
+        settings.overviewMaxWindows = 1
+        let transport = MockLMStudioTransport()
+        let pipeline = TranslationPipeline(store: store, client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: transport))
+        let job = try await pipeline.createJob(name: "Budgeted", sources: [SourceDocument(name: "long.txt", text: sourceText)], series: false, settings: settings)
+        let planned = try await pipeline.run(jobID: job.id, settings: settings)
+        let checkpoint = try XCTUnwrap(planned.plannerCheckpoint)
+        XCTAssertGreaterThan(checkpoint.completedWindows.count, 1)
+        XCTAssertEqual(checkpoint.completedWindows.first?.startOffset, 0)
+        XCTAssertEqual(checkpoint.completedWindows.last?.endOffset, sourceText.count)
+        for pair in zip(checkpoint.completedWindows, checkpoint.completedWindows.dropFirst()) {
+            XCTAssertEqual(pair.0.endOffset, pair.1.startOffset)
+        }
+        XCTAssertEqual(checkpoint.mergedGuide.titleZh, "测试作品")
+        let chatRequestCount = transport.recordedRequests.filter { $0.url?.path == "/v1/chat/completions" }.count
+        XCTAssertEqual(chatRequestCount, checkpoint.completedWindows.count)
+
+        let firstCompletedWindow = try XCTUnwrap(checkpoint.completedWindows.first)
+        var interruptedJob = planned
+        interruptedJob.guide = nil
+        interruptedJob.status = .paused
+        interruptedJob.plannerCheckpoint = PlannerCheckpoint(
+            sourceDigest: checkpoint.sourceDigest,
+            configurationDigest: checkpoint.configurationDigest,
+            nextFileIndex: firstCompletedWindow.fileIndex,
+            nextOffset: firstCompletedWindow.endOffset,
+            mergedGuide: checkpoint.mergedGuide,
+            completedWindows: [firstCompletedWindow]
+        )
+        try await store.save(interruptedJob)
+        let resumed = try await pipeline.run(jobID: job.id, settings: settings)
+        let resumedCheckpoint = try XCTUnwrap(resumed.plannerCheckpoint)
+        XCTAssertEqual(resumedCheckpoint.completedWindows.count, checkpoint.completedWindows.count)
+        XCTAssertEqual(resumedCheckpoint.completedWindows.first?.id, firstCompletedWindow.id)
+        XCTAssertEqual(transport.recordedRequests.filter { $0.url?.path == "/v1/chat/completions" }.count - chatRequestCount, checkpoint.completedWindows.count - 1)
+    }
+
+    func testRefineMergesLaterSectionAndCharacterEvidenceWithoutChangingLockedNames() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let transport = MockLMStudioTransport()
+        let settings = AppSettings(controllerModel: "controller", translatorModel: "translator", controllerContext: 4_096, maxChunkCharacters: 30_000, contextCharacters: 0, pauseAfterOverview: true)
+        let source = "第一夜\n" + String(repeating: "主人公は歩く。主人公様は止まる。龍王を思い出す。\n", count: 1_000)
+        let store = JobStore(rootURL: root)
+        let pipeline = TranslationPipeline(store: store, client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: transport))
+        let job = try await pipeline.createJob(name: "夢十夜", sources: [SourceDocument(name: "夢十夜.txt", text: source)], series: false, settings: settings)
+        let sectionID = try XCTUnwrap(job.sections?.first?.id)
+        let first = TranslationGuide(
+            titleZh: "锁定标题",
+            sourceLanguage: "日语",
+            genre: "小说",
+            synopsis: "第一窗口情节",
+            style: TranslationStyle(narration: "克制叙述"),
+            characters: [CharacterEntry(source: "主人公", target: "甲", role: "最初身份", voice: "谨慎")],
+            terms: [GlossaryEntry(source: "龍王", target: "龙王", category: "人名", note: "初次提及")],
+            rules: ["保留第一人称"],
+            sections: [SectionInsight(sectionID: sectionID, sourceTitle: "第一夜", sectionType: "独立小篇", summary: "主人公开始行动。", evidence: "主人公は歩く。")]
+        )
+        let later = TranslationGuide(
+            titleZh: "后续标题",
+            sourceLanguage: "日语",
+            genre: "小说",
+            synopsis: "第二窗口线索",
+            style: TranslationStyle(narration: "保留内心距离"),
+            characters: [CharacterEntry(source: "主人公", target: "乙", gender: "男", role: "真实身份", voice: "坚定", aliases: [GlossaryAlias(source: "主人公様", target: "主人公大人")])],
+            terms: [GlossaryEntry(source: "龍王", target: "王龙", category: "人名", note: "后续再次出现")],
+            rules: ["保持敬称一致"],
+            sections: [SectionInsight(sectionID: sectionID, sourceTitle: "第一夜", sectionType: "人物线索", summary: "主人公遇到阻碍。", evidence: "主人公様は止まる。")]
+        )
+        let encoder = JSONEncoder()
+        transport.enqueueChatResponses([
+            String(decoding: try encoder.encode(first), as: UTF8.self),
+            String(decoding: try encoder.encode(later), as: UTF8.self)
+        ])
+
+        let refined = try await pipeline.run(jobID: job.id, settings: settings)
+        let guide = try XCTUnwrap(refined.guide)
+        let character = try XCTUnwrap(guide.characters.first { $0.source == "主人公" })
+        let term = try XCTUnwrap(guide.terms.first { $0.source == "龍王" })
+        let section = try XCTUnwrap(guide.sections.first { $0.sectionID == sectionID })
+        XCTAssertGreaterThan(try XCTUnwrap(refined.plannerCheckpoint).completedWindows.count, 1)
+        XCTAssertEqual(guide.titleZh, "锁定标题")
+        XCTAssertTrue(guide.synopsis.contains("第一窗口情节"))
+        XCTAssertTrue(guide.synopsis.contains("第二窗口线索"))
+        XCTAssertTrue(guide.rules.contains("保留第一人称"))
+        XCTAssertTrue(guide.rules.contains("保持敬称一致"))
+        XCTAssertEqual(character.target, "甲")
+        XCTAssertEqual(character.gender, "男")
+        XCTAssertTrue(character.role.contains("最初身份"))
+        XCTAssertTrue(character.role.contains("真实身份"))
+        XCTAssertTrue(character.voice.contains("谨慎"))
+        XCTAssertTrue(character.voice.contains("坚定"))
+        XCTAssertTrue(character.aliases.contains { $0.source == "主人公様" && $0.target == "主人公大人" })
+        XCTAssertEqual(term.target, "龙王")
+        XCTAssertTrue(term.note.contains("初次提及"))
+        XCTAssertTrue(term.note.contains("后续再次出现"))
+        XCTAssertTrue(section.summary.contains("主人公开始行动。"))
+        XCTAssertTrue(section.summary.contains("主人公遇到阻碍。"))
+        XCTAssertTrue(section.evidence.contains("主人公は歩く。"))
+        XCTAssertTrue(section.evidence.contains("主人公様は止まる。"))
+    }
+
+    func testOversizedAccumulatedGuideFailsWithoutDroppingEarlierFacts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = JobStore(rootURL: root)
+        let transport = MockLMStudioTransport()
+        let settings = AppSettings(controllerModel: "controller", controllerContext: 8_192, maxChunkCharacters: 120_000, contextCharacters: 0)
+        let names = (0..<240).map { String(format: "T%03d", $0) }
+        let source = names.joined(separator: " ") + "\n" + String(repeating: "主人公继续前进。", count: 15_000)
+        let terms = names.map { GlossaryEntry(source: $0, target: "译\($0)", note: String(repeating: "证据说明", count: 35)) }
+        let guide = TranslationGuide(titleZh: "保留所有事实", terms: terms)
+        let pipeline = TranslationPipeline(store: store, client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: transport))
+        let job = try await pipeline.createJob(name: "Long guide", sources: [SourceDocument(name: "long.txt", text: source)], series: false, settings: settings)
+        transport.enqueueChatResponses([String(decoding: try JSONEncoder().encode(guide), as: UTF8.self)])
+        do {
+            _ = try await pipeline.run(jobID: job.id, settings: settings)
+            XCTFail("Expected an explicit context-budget failure")
+        } catch TranslationPipelineError.plannerContextExceeded {
+        } catch {
+            XCTFail("Unexpected error type")
+        }
+        let loadedJob = try await store.loadJob(id: job.id)
+        let saved = try XCTUnwrap(loadedJob)
+        let checkpoint = try XCTUnwrap(saved.plannerCheckpoint)
+        XCTAssertEqual(checkpoint.completedWindows.count, 1)
+        XCTAssertEqual(checkpoint.mergedGuide.terms.count, terms.count)
+        XCTAssertEqual(checkpoint.mergedGuide.terms.map(\.source), names)
+        XCTAssertEqual(transport.recordedRequests.filter { $0.url?.path == "/v1/chat/completions" }.count, 1)
+    }
+
+    func testPersistedTranslatingChunkIsRecoveredOnResume() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = JobStore(rootURL: root)
+        let settings = AppSettings(controllerModel: "controller", translatorModel: "translator", pauseAfterOverview: true)
+        let pipeline = TranslationPipeline(store: store, client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: MockLMStudioTransport()))
+        var job = try await pipeline.createJob(name: "Resume", sources: [SourceDocument(name: "resume.txt", text: "一段用于恢复测试的原文。")], series: false, settings: settings)
+        job.status = .failed
+        job.error = "previous empty model completion"
+        job.chunks[0].status = .translating
+        try await store.save(job)
+
+        let resumed = try await pipeline.run(jobID: job.id, settings: settings)
+        XCTAssertEqual(resumed.status, .awaitingGuide)
+        XCTAssertNotEqual(resumed.chunks[0].status, .translating)
+    }
+
+    func testSettingsOmitLegacyTokenAndRemainBackwardCompatible() throws {
+        let legacy = Data(#"{"apiToken":"legacy-only-token","controllerModel":"old-controller"}"#.utf8)
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: legacy)
+        XCTAssertEqual(decoded.apiToken, "legacy-only-token")
+        XCTAssertEqual(decoded.controllerModel, "old-controller")
+        let encoded = try JSONEncoder().encode(decoded)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertNil(object["apiToken"])
+    }
+
+    func testSectionInsightUsesDocumentedJSONFieldNames() throws {
+        let value = SectionInsight(sectionID: "file-0-section-1", sourceTitle: "第一夜", sectionType: "独立篇章", summary: "夜间故事。", evidence: "第一夜")
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: String])
+        XCTAssertEqual(object["section_id"], "file-0-section-1")
+        XCTAssertEqual(object["source_title"], "第一夜")
+        XCTAssertEqual(object["section_type"], "独立篇章")
+        XCTAssertNil(object["sectionID"])
+    }
+
+    func testGLMCodingPlanUsesProviderPrefixAndSafeRequestFields() async throws {
+        let transport = MockLMStudioTransport()
+        let client = LMStudioClient(baseURL: "https://open.bigmodel.cn/api/coding/paas/v4", apiToken: "test-key", provider: .glmCodingPlan, transport: transport)
+        _ = try await client.chat(model: "glm-5.3-flash", prompt: ChatPrompt(system: "system", user: "hello"), temperature: 1, maxTokens: 64, contextLength: 4_096, reasoningEffort: "none", responseSchema: ["type": "object"])
+        let request = try XCTUnwrap(transport.recordedRequests.first)
+        XCTAssertEqual(request.url?.path, "/api/coding/paas/v4/chat/completions")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-key")
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any])
+        XCTAssertEqual(body["temperature"] as? Double, 1)
+        XCTAssertEqual((body["thinking"] as? [String: String])?["type"], "enabled")
+        XCTAssertNil(body["reasoning_effort"])
+        XCTAssertNil(body["top_p"])
+        XCTAssertNil(body["stream_options"])
+        XCTAssertEqual((body["response_format"] as? [String: String])?["type"], "json_object")
+
+        let settings = AppSettings(provider: .glmCodingPlan)
+        try await ModelScheduler.prepare(role: "controller", settings: settings, client: client)
+        XCTAssertEqual(transport.recordedRequests.count, 1)
+    }
+
+    func testGLMTranslationBudgetIncludesThinkingReserve() {
+        let source = String(repeating: "夏目漱石の小説。", count: 100)
+        let localBudget = TranslationOutputBudget.maxTokens(source: source, provider: .lmStudio)
+        let glmBudget = TranslationOutputBudget.maxTokens(source: source, provider: .glmCodingPlan)
+        XCTAssertEqual(glmBudget - localBudget, max(12_288, localBudget))
+        XCTAssertGreaterThan(glmBudget, localBudget)
+    }
+
+    func testEmptyPlannerCompletionIsDiagnosticAndNotRetriedUnchanged() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let transport = MockLMStudioTransport(chatResponses: [""], chatFinishReasons: ["length"])
+        let pipeline = TranslationPipeline(store: JobStore(rootURL: root), client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: transport))
+        let settings = AppSettings(controllerModel: "controller", translatorModel: "translator")
+        let job = try await pipeline.createJob(name: "Empty", sources: [SourceDocument(name: "empty.txt", text: "A short passage.")], series: false, settings: settings)
+        do {
+            _ = try await pipeline.run(jobID: job.id, settings: settings)
+            XCTFail("Expected the empty completion diagnostic")
+        } catch let error as LMStudioError {
+            guard case .emptyCompletion(_, _, let finishReason, _, _, _, _, let completionTokens, _) = error else {
+                return XCTFail("Expected an empty-completion diagnostic")
+            }
+            XCTAssertEqual(finishReason, "length")
+            XCTAssertEqual(completionTokens, 10)
+            XCTAssertFalse(error.localizedDescription.contains("messages"))
+        }
+        XCTAssertEqual(transport.recordedRequests.filter { $0.url?.path == "/v1/chat/completions" }.count, 1)
+    }
+
+    func testKeychainCredentialRoundTripUsesIsolatedService() throws {
+        let service = "com.crystalagentictranslator.tests.\(UUID().uuidString)"
+        let keychain = KeychainCredentialStore(service: service)
+        defer { try? keychain.delete(for: .glmCodingPlan) }
+        try keychain.save("test-credential", for: .glmCodingPlan)
+        XCTAssertEqual(try keychain.credential(for: .glmCodingPlan), "test-credential")
+        try keychain.delete(for: .glmCodingPlan)
+        XCTAssertNil(try keychain.credential(for: .glmCodingPlan))
+    }
+
+    func testLegacyCredentialMigrationClearsSettingsAndPreservesExistingKeychainValue() throws {
+        let service = "com.crystalagentictranslator.tests.\(UUID().uuidString)"
+        let keychain = KeychainCredentialStore(service: service)
+        defer { try? keychain.delete(for: .lmStudio) }
+        var legacy = AppSettings(apiToken: "legacy-test-token")
+        XCTAssertTrue(try keychain.migrateLegacyCredential(in: &legacy))
+        XCTAssertTrue(legacy.apiToken.isEmpty)
+        XCTAssertEqual(try keychain.credential(for: .lmStudio), "legacy-test-token")
+
+        try keychain.save("existing-keychain-token", for: .lmStudio)
+        var staleLegacy = AppSettings(apiToken: "stale-legacy-token")
+        XCTAssertTrue(try keychain.migrateLegacyCredential(in: &staleLegacy))
+        XCTAssertTrue(staleLegacy.apiToken.isEmpty)
+        XCTAssertEqual(try keychain.credential(for: .lmStudio), "existing-keychain-token")
+    }
+
+    func testWorkspaceDiaryPersistsRotatesAndRedactsCredentials() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let diary = WorkspaceDiaryStore(rootURL: root, byteLimit: 4_096, rotationCount: 2)
+        let jobID = UUID()
+        for index in 0..<35 {
+            try await diary.append(level: index == 34 ? .error : .info, category: .pipeline, jobID: jobID,
+                                   message: index == 34 ? "Authorization: Bearer test-secret-value" : String(repeating: "事件", count: 80))
+        }
+        let entries = try await WorkspaceDiaryStore(rootURL: root, byteLimit: 4_096, rotationCount: 2).load()
+        XCTAssertLessThan(entries.count, 35)
+        XCTAssertTrue(entries.contains { $0.message.contains("[REDACTED]") && !$0.message.contains("test-secret-value") })
+        XCTAssertTrue(entries.allSatisfy { $0.jobID == jobID })
+    }
+
+    func testWorkspaceDiaryRedactsFullCredentialBeforeTruncating() {
+        let credential = String(repeating: "a", count: 32) + "." + String(repeating: "b", count: 20)
+        let message = String(repeating: "x", count: 1_985) + credential
+        let redacted = WorkspaceDiaryStore.redact(message)
+        XCTAssertTrue(redacted.contains("[REDACTED]"))
+        XCTAssertFalse(redacted.contains(String(repeating: "a", count: 15)))
+        XCTAssertLessThanOrEqual(redacted.count, 2_000)
+    }
+}
+
 final class URLSessionTransportIntegrationTests: XCTestCase {
     func testChatParsesIncrementalMultilineSSEOverLocalHTTP() async throws {
         let body = Data("data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}],\r\ndata: \"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\r\n\r\ndata: [DONE]\n\n".utf8)
@@ -734,9 +1032,115 @@ final class URLSessionTransportIntegrationTests: XCTestCase {
         XCTAssertEqual(response.promptTokens, 7)
         XCTAssertEqual(response.completionTokens, 3)
     }
+
+    func testEmptyGLMStreamReportsFinishUsageAndReasoningWithoutRequestData() async throws {
+        let payload: [String: Any] = [
+            "marker": "你",
+            "choices": [["delta": ["reasoning_content": "内部思考"], "finish_reason": "length"]],
+            "usage": ["prompt_tokens": 17, "completion_tokens": 64]
+        ]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self)
+        let server = try LocalSSEHTTPServer(body: Data("data: \(json)\n\n".utf8))
+        let port = try server.start()
+        defer { server.stop() }
+        let client = LMStudioClient(
+            baseURL: "http://127.0.0.1:\(port)/api/coding/paas/v4",
+            apiToken: "fixture-client-token",
+            provider: .glmCodingPlan,
+            transport: URLSessionTransport()
+        )
+        do {
+            _ = try await client.chat(model: "glm-5.3-flash", prompt: ChatPrompt(system: "private system text", user: "private source text"), temperature: 1, maxTokens: 6_000, contextLength: 8_192)
+            XCTFail("Expected an empty-completion diagnostic")
+        } catch let caughtError as LMStudioError {
+            guard case .emptyCompletion(let provider, let model, let finishReason, let promptEstimate, let contextLength, let maxTokens, let promptTokens, let completionTokens, let reasoningCharacters) = caughtError else {
+                return XCTFail("Expected an empty-completion diagnostic")
+            }
+            XCTAssertEqual(provider, "GLM Coding Plan")
+            XCTAssertEqual(model, "glm-5.3-flash")
+            XCTAssertEqual(finishReason, "length")
+            XCTAssertGreaterThan(promptEstimate, 0)
+            XCTAssertEqual(contextLength, 8_192)
+            XCTAssertEqual(maxTokens, 6_000)
+            XCTAssertEqual(promptTokens, 17)
+            XCTAssertEqual(completionTokens, 64)
+            XCTAssertEqual(reasoningCharacters, 4)
+            let description = caughtError.localizedDescription
+            XCTAssertFalse(description.contains("fixture-client-token"))
+            XCTAssertFalse(description.contains("private source text"))
+            XCTAssertFalse(description.contains("private system text"))
+        } catch {
+            XCTFail("Unexpected error type")
+        }
+    }
+
+    func testRemoteFinishReasonAndUsageAreRetainedWithText() async throws {
+        let payload: [String: Any] = [
+            "choices": [["delta": ["content": "你译文"], "finish_reason": "length"]],
+            "usage": ["prompt_tokens": 19, "completion_tokens": 43]
+        ]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self)
+        let server = try LocalSSEHTTPServer(body: Data("data: \(json)\n\n".utf8))
+        let port = try server.start()
+        defer { server.stop() }
+        let client = LMStudioClient(baseURL: "http://127.0.0.1:\(port)", transport: URLSessionTransport())
+        let response = try await client.chat(model: "translator", prompt: ChatPrompt(system: "Translate.", user: "Source."), temperature: 0, maxTokens: 64, contextLength: 2_048)
+        XCTAssertEqual(response.content, "你译文")
+        XCTAssertEqual(response.finishReason, "length")
+        XCTAssertEqual(response.promptTokens, 19)
+        XCTAssertEqual(response.completionTokens, 43)
+    }
+
+    func testProviderErrorObjectInSSEIsSurfacedWithoutRawRequestOrCredential() async throws {
+        let payload: [String: Any] = ["marker": "你", "error": ["message": "Rejected secret request fixture-client-token", "type": "invalid_request_error", "code": 401]]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self)
+        let server = try LocalSSEHTTPServer(body: Data("data: \(json)\n\n".utf8))
+        let port = try server.start()
+        defer { server.stop() }
+        let client = LMStudioClient(
+            baseURL: "http://127.0.0.1:\(port)/api/coding/paas/v4",
+            apiToken: "fixture-client-token",
+            provider: .glmCodingPlan,
+            transport: URLSessionTransport()
+        )
+        do {
+            _ = try await client.chat(model: "glm-5.3-flash", prompt: ChatPrompt(system: "hidden", user: "secret request"), temperature: 1, maxTokens: 64, contextLength: 2_048)
+            XCTFail("Expected a provider stream error")
+        } catch LMStudioError.providerStreamError(let message) {
+            XCTAssertTrue(message.contains("GLM Coding Plan"))
+            XCTAssertTrue(message.contains("glm-5.3-flash"))
+            XCTAssertTrue(message.contains("type=invalid_request_error"))
+            XCTAssertTrue(message.contains("code=401"))
+            XCTAssertFalse(message.contains("fixture-client-token"))
+            XCTAssertFalse(message.contains("secret request"))
+            XCTAssertFalse(message.contains("Rejected"))
+        } catch {
+            XCTFail("Unexpected error type")
+        }
+    }
 }
 
 final class LMStudioTransportSecurityTests: XCTestCase {
+    func testHTTPErrorRedactsCredentialEchoFromResponseBody() async throws {
+        let credential = "mock-credential-value-123"
+        let body = Data("Rejected credential: \(credential)".utf8)
+        let client = LMStudioClient(
+            baseURL: "http://127.0.0.1:1234",
+            apiToken: credential,
+            transport: APIErrorEchoTransport(payload: HTTPPayload(data: body, statusCode: 401))
+        )
+        do {
+            _ = try await client.models()
+            XCTFail("Expected an unauthorized response")
+        } catch LMStudioError.http(let status, let message) {
+            XCTAssertEqual(status, 401)
+            XCTAssertTrue(message.contains("[REDACTED]"))
+            XCTAssertFalse(message.contains(credential))
+        } catch {
+            XCTFail("Unexpected error type")
+        }
+    }
+
     func testPlainHTTPIsRejectedForNonLoopbackHosts() async throws {
         let transport = MockLMStudioTransport()
         let client = LMStudioClient(baseURL: "http://api.example.com:1234", transport: transport)
@@ -774,6 +1178,16 @@ final class LMStudioTransportSecurityTests: XCTestCase {
             }
             XCTAssertTrue(transport.recordedRequests.isEmpty)
         }
+    }
+}
+
+private struct APIErrorEchoTransport: LMStudioTransport {
+    var payload: HTTPPayload
+
+    func send(_ request: URLRequest) async throws -> HTTPPayload { payload }
+
+    func stream(_ request: URLRequest) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in continuation.finish() }
     }
 }
 

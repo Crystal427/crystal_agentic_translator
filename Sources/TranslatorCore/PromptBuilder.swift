@@ -37,7 +37,8 @@ public struct ChatPrompt: Sendable {
 }
 
 public enum PromptBuilder {
-    public static func planner(text: String, windowIndex: Int, windowCount: Int, existing: TranslationGuide?, settings: AppSettings) -> ChatPrompt {
+    public static func planner(text: String, windowIndex: Int, windowCount: Int? = nil, existing: TranslationGuide?, settings: AppSettings, fileName: String = "", sections: [DocumentSection] = []) -> ChatPrompt {
+        let explicitSections = sections.filter(\.isExplicit)
         let system = """
         你是一个长篇文学翻译项目的「主编 Agent」。你不亲自翻译正文，你的职责是：通读原文、制定翻译规范、锁定专名译名、维护剧情记忆、审校译文质量。
         工作原则：一切判断以原文为准，不臆测原文没有的情节，不续写故事；专名译名一旦确定就永久沿用，不得擅自更换；除逐字引用原文的字段外，所有输出一律使用目标语言；只输出符合要求的 JSON，不要输出多余文字。
@@ -53,7 +54,7 @@ public enum PromptBuilder {
 
             【已有大纲】（根据前面的窗口写成，已有译名已经锁定，不得更改）\(json(existing))
             已锁定专名：\(names)
-            更新 title_zh、genre、synopsis、style 和 rules；characters 与 terms 只返回已有大纲中没有的新条目。不得更改已锁定的译名。
+            更新 title_zh、genre、synopsis、style 和 rules；characters、terms 与 sections 只返回当前窗口中有新证据的条目。不得更改已锁定的译名。
             """
         } else {
             existingText = ""
@@ -63,11 +64,15 @@ public enum PromptBuilder {
         目标语言：\(settings.targetLanguage)
         额外要求：\(settings.extraInstructions)
         \(existingText)
-        【原文节选 \(windowIndex)/\(windowCount)】
+        【来源文件】\(fileName.isEmpty ? "未命名" : fileName)
+        【连续原文窗口】\(windowCount.map { "\(windowIndex)/\($0)" } ?? "第 \(windowIndex) 个")
+        【原文中明确识别的小节】
+        \(explicitSections.isEmpty ? "无显式小节标记；不要虚构标题。" : explicitSections.map { "\($0.id)｜标题：\($0.title.isEmpty ? "（无标题）" : $0.title)｜标记：\($0.marker)" }.joined(separator: "\n"))
+        【通读原文 · 原文节选】
         <<<
         \(text)
         >>>
-        输出 title_zh、source_language、genre、synopsis（300字内）、style（narration/tone/diction/dialogue/punctuation）、characters（所有有名字的出场人物，含 source/target/gender/role/voice/aliases；gender 只能是男、女、未知；全名和每个别称都要列出并保持译名一致）、terms（地名、组织、物品、技能招式、特殊称谓等专名，含 source/target/category/note；category 只能是人名、地名、组织、物品、术语、称谓、其他，不收录普通词汇）、rules（3至8条具体可执行的翻译守则）。角色译名和其他专名先到先得。source 必须逐字照抄原文（含大小写），不得收录当前窗口原文中不存在的专名。
+        输出 title_zh、source_language、genre、synopsis（300字内）、style（narration/tone/diction/dialogue/punctuation）、characters（所有有名字的出场人物，含 source/target/gender/role/voice/aliases；gender 只能是男、女、未知；全名和每个别称都要列出并保持译名一致）、terms（地名、组织、物品、技能招式、特殊称谓等专名，含 source/target/category/note；category 只能是人名、地名、组织、物品、术语、称谓、其他，不收录普通词汇）、rules（3至8条具体可执行的翻译守则）、sections（只描述本窗口出现且有证据的小节，含 section_id、source_title、section_type、summary、evidence；判断多个小节是否各自构成独立故事/篇章时必须依据明确标题或原文证据，不确定时说明不确定；evidence 必须逐字引用当前窗口）。角色译名和其他专名先到先得。source 必须逐字照抄原文（含大小写），不得收录当前窗口原文中不存在的专名或 section_id。
         """
         return ChatPrompt(system: system, user: user)
     }
@@ -79,6 +84,7 @@ public enum PromptBuilder {
         let user = """
         【任务】预读第 \(index)/\(total) 个片段，为翻译做准备并更新剧情记忆。
         【作品】\(guide.titleZh)｜\(guide.genre)
+        【来源小节】\(chunk.sectionTitle?.isEmpty == false ? chunk.sectionTitle! : "未标记")
         【已锁定专名】\(relevantGlossary(in: chunk.source, guide: guide).map { "\($0.source)→\($0.target)" }.joined(separator: "、"))
         【当前剧情记忆】（上个片段为止）
         \(memory.isEmpty ? "# 剧情记忆\n## 主线进展\n- 暂无\n## 人物状态\n- 暂无\n## 伏笔与悬念\n- 暂无\n## 最新进展\n暂无" : memory)
@@ -126,6 +132,7 @@ public enum PromptBuilder {
         """
         let user = """
         请将以下\(settings.sourceLanguage == "auto" ? guide.sourceLanguage : settings.sourceLanguage)\(settings.genre)翻译成\(settings.targetLanguage)，并且严格遵循所有约束要求。
+        【来源小节】\(chunk.sectionTitle?.isEmpty == false ? chunk.sectionTitle! : "未标记")
 
         【源文】
         \(chunk.source)

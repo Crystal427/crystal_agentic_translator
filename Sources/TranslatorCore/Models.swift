@@ -1,6 +1,7 @@
 import Foundation
 
 public struct AppSettings: Codable, Equatable, Sendable {
+    public var provider: ModelProvider
     public var baseURL: String
     public var apiToken: String
     public var controllerModel: String
@@ -26,6 +27,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var extraInstructions: String
 
     public init(
+        provider: ModelProvider = .lmStudio,
         baseURL: String = "http://127.0.0.1:1234",
         apiToken: String = "",
         controllerModel: String = "hemmingway-1.5-i1",
@@ -50,6 +52,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         genre: String = "小说",
         extraInstructions: String = ""
     ) {
+        self.provider = provider
         self.baseURL = baseURL
         self.apiToken = apiToken
         self.controllerModel = controllerModel
@@ -74,6 +77,76 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.genre = genre
         self.extraInstructions = extraInstructions
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case provider, baseURL, apiToken, controllerModel, translatorModel, controllerContext, controllerReasoning
+        case controllerTemperature, translatorContext, translatorTemperature, modelStrategy, maxChunkCharacters
+        case contextCharacters, batchSize, passScore, maxRetries, overviewMaxWindows, pauseAfterOverview
+        case memoryMaxCharacters, summaryMaxCharacters, sourceLanguage, targetLanguage, genre, extraInstructions
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = AppSettings()
+        self.init(
+            provider: try container.decodeIfPresent(ModelProvider.self, forKey: .provider) ?? defaults.provider,
+            baseURL: try container.decodeIfPresent(String.self, forKey: .baseURL) ?? defaults.baseURL,
+            apiToken: try container.decodeIfPresent(String.self, forKey: .apiToken) ?? "",
+            controllerModel: try container.decodeIfPresent(String.self, forKey: .controllerModel) ?? defaults.controllerModel,
+            translatorModel: try container.decodeIfPresent(String.self, forKey: .translatorModel) ?? defaults.translatorModel,
+            controllerContext: try container.decodeIfPresent(Int.self, forKey: .controllerContext) ?? defaults.controllerContext,
+            controllerReasoning: try container.decodeIfPresent(String.self, forKey: .controllerReasoning) ?? defaults.controllerReasoning,
+            controllerTemperature: try container.decodeIfPresent(Double.self, forKey: .controllerTemperature) ?? defaults.controllerTemperature,
+            translatorContext: try container.decodeIfPresent(Int.self, forKey: .translatorContext) ?? defaults.translatorContext,
+            translatorTemperature: try container.decodeIfPresent(Double.self, forKey: .translatorTemperature) ?? defaults.translatorTemperature,
+            modelStrategy: try container.decodeIfPresent(ModelStrategy.self, forKey: .modelStrategy) ?? defaults.modelStrategy,
+            maxChunkCharacters: try container.decodeIfPresent(Int.self, forKey: .maxChunkCharacters) ?? defaults.maxChunkCharacters,
+            contextCharacters: try container.decodeIfPresent(Int.self, forKey: .contextCharacters) ?? defaults.contextCharacters,
+            batchSize: try container.decodeIfPresent(Int.self, forKey: .batchSize) ?? defaults.batchSize,
+            passScore: try container.decodeIfPresent(Int.self, forKey: .passScore) ?? defaults.passScore,
+            maxRetries: try container.decodeIfPresent(Int.self, forKey: .maxRetries) ?? defaults.maxRetries,
+            overviewMaxWindows: try container.decodeIfPresent(Int.self, forKey: .overviewMaxWindows) ?? defaults.overviewMaxWindows,
+            pauseAfterOverview: try container.decodeIfPresent(Bool.self, forKey: .pauseAfterOverview) ?? defaults.pauseAfterOverview,
+            memoryMaxCharacters: try container.decodeIfPresent(Int.self, forKey: .memoryMaxCharacters) ?? defaults.memoryMaxCharacters,
+            summaryMaxCharacters: try container.decodeIfPresent(Int.self, forKey: .summaryMaxCharacters) ?? defaults.summaryMaxCharacters,
+            sourceLanguage: try container.decodeIfPresent(String.self, forKey: .sourceLanguage) ?? defaults.sourceLanguage,
+            targetLanguage: try container.decodeIfPresent(String.self, forKey: .targetLanguage) ?? defaults.targetLanguage,
+            genre: try container.decodeIfPresent(String.self, forKey: .genre) ?? defaults.genre,
+            extraInstructions: try container.decodeIfPresent(String.self, forKey: .extraInstructions) ?? defaults.extraInstructions
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(provider, forKey: .provider)
+        try container.encode(baseURL, forKey: .baseURL)
+        try container.encode(controllerModel, forKey: .controllerModel)
+        try container.encode(translatorModel, forKey: .translatorModel)
+        try container.encode(controllerContext, forKey: .controllerContext)
+        try container.encode(controllerReasoning, forKey: .controllerReasoning)
+        try container.encode(controllerTemperature, forKey: .controllerTemperature)
+        try container.encode(translatorContext, forKey: .translatorContext)
+        try container.encode(translatorTemperature, forKey: .translatorTemperature)
+        try container.encode(modelStrategy, forKey: .modelStrategy)
+        try container.encode(maxChunkCharacters, forKey: .maxChunkCharacters)
+        try container.encode(contextCharacters, forKey: .contextCharacters)
+        try container.encode(batchSize, forKey: .batchSize)
+        try container.encode(passScore, forKey: .passScore)
+        try container.encode(maxRetries, forKey: .maxRetries)
+        try container.encode(overviewMaxWindows, forKey: .overviewMaxWindows)
+        try container.encode(pauseAfterOverview, forKey: .pauseAfterOverview)
+        try container.encode(memoryMaxCharacters, forKey: .memoryMaxCharacters)
+        try container.encode(summaryMaxCharacters, forKey: .summaryMaxCharacters)
+        try container.encode(sourceLanguage, forKey: .sourceLanguage)
+        try container.encode(targetLanguage, forKey: .targetLanguage)
+        try container.encode(genre, forKey: .genre)
+        try container.encode(extraInstructions, forKey: .extraInstructions)
+    }
+}
+
+public enum ModelProvider: String, Codable, CaseIterable, Sendable {
+    case lmStudio
+    case glmCodingPlan
 }
 
 public enum ModelStrategy: String, Codable, CaseIterable, Sendable {
@@ -187,8 +260,9 @@ public struct TranslationGuide: Codable, Equatable, Sendable {
     public var characters: [CharacterEntry]
     public var terms: [GlossaryEntry]
     public var rules: [String]
+    public var sections: [SectionInsight]
 
-    public init(titleZh: String = "", sourceLanguage: String = "", genre: String = "", synopsis: String = "", style: TranslationStyle = .init(), characters: [CharacterEntry] = [], terms: [GlossaryEntry] = [], rules: [String] = []) {
+    public init(titleZh: String = "", sourceLanguage: String = "", genre: String = "", synopsis: String = "", style: TranslationStyle = .init(), characters: [CharacterEntry] = [], terms: [GlossaryEntry] = [], rules: [String] = [], sections: [SectionInsight] = []) {
         self.titleZh = titleZh
         self.sourceLanguage = sourceLanguage
         self.genre = genre
@@ -197,12 +271,129 @@ public struct TranslationGuide: Codable, Equatable, Sendable {
         self.characters = characters
         self.terms = terms
         self.rules = rules
+        self.sections = sections
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        titleZh = try container.decodeIfPresent(String.self, forKey: .titleZh) ?? ""
+        sourceLanguage = try container.decodeIfPresent(String.self, forKey: .sourceLanguage) ?? ""
+        genre = try container.decodeIfPresent(String.self, forKey: .genre) ?? ""
+        synopsis = try container.decodeIfPresent(String.self, forKey: .synopsis) ?? ""
+        style = try container.decodeIfPresent(TranslationStyle.self, forKey: .style) ?? .init()
+        characters = try container.decodeIfPresent([CharacterEntry].self, forKey: .characters) ?? []
+        terms = try container.decodeIfPresent([GlossaryEntry].self, forKey: .terms) ?? []
+        rules = try container.decodeIfPresent([String].self, forKey: .rules) ?? []
+        sections = try container.decodeIfPresent([SectionInsight].self, forKey: .sections) ?? []
     }
 
     enum CodingKeys: String, CodingKey {
         case titleZh = "title_zh"
         case sourceLanguage = "source_language"
-        case genre, synopsis, style, characters, terms, rules
+        case genre, synopsis, style, characters, terms, rules, sections
+    }
+}
+
+public struct SectionInsight: Codable, Equatable, Identifiable, Sendable {
+    public var sectionID: String
+    public var sourceTitle: String
+    public var sectionType: String
+    public var summary: String
+    public var evidence: String
+    public var id: String { sectionID }
+
+    public init(sectionID: String, sourceTitle: String, sectionType: String, summary: String, evidence: String) {
+        self.sectionID = sectionID
+        self.sourceTitle = sourceTitle
+        self.sectionType = sectionType
+        self.summary = summary
+        self.evidence = evidence
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sectionID = "section_id"
+        case sourceTitle = "source_title"
+        case sectionType = "section_type"
+        case summary, evidence
+    }
+}
+
+public struct DocumentSection: Codable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var fileIndex: Int
+    public var index: Int
+    public var title: String
+    public var marker: String
+    public var startOffset: Int
+    public var endOffset: Int
+    public var isExplicit: Bool
+
+    public init(id: String, fileIndex: Int, index: Int, title: String, marker: String, startOffset: Int, endOffset: Int, isExplicit: Bool = true) {
+        self.id = id
+        self.fileIndex = fileIndex
+        self.index = index
+        self.title = title
+        self.marker = marker
+        self.startOffset = startOffset
+        self.endOffset = endOffset
+        self.isExplicit = isExplicit
+    }
+}
+
+public struct PlannerWindowEvidence: Codable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var fileIndex: Int
+    public var fileName: String
+    public var startOffset: Int
+    public var endOffset: Int
+    public var sectionIDs: [String]
+    public var sourceDigest: String
+
+    public init(id: String, fileIndex: Int, fileName: String, startOffset: Int, endOffset: Int, sectionIDs: [String], sourceDigest: String) {
+        self.id = id
+        self.fileIndex = fileIndex
+        self.fileName = fileName
+        self.startOffset = startOffset
+        self.endOffset = endOffset
+        self.sectionIDs = sectionIDs
+        self.sourceDigest = sourceDigest
+    }
+}
+
+public struct PlannerCheckpoint: Codable, Equatable, Sendable {
+    public var sourceDigest: String
+    public var configurationDigest: String
+    public var nextFileIndex: Int
+    public var nextOffset: Int
+    public var mergedGuide: TranslationGuide
+    public var completedWindows: [PlannerWindowEvidence]
+
+    public init(sourceDigest: String, configurationDigest: String, nextFileIndex: Int, nextOffset: Int, mergedGuide: TranslationGuide, completedWindows: [PlannerWindowEvidence]) {
+        self.sourceDigest = sourceDigest
+        self.configurationDigest = configurationDigest
+        self.nextFileIndex = nextFileIndex
+        self.nextOffset = nextOffset
+        self.mergedGuide = mergedGuide
+        self.completedWindows = completedWindows
+    }
+}
+
+public struct AgentOutputSnapshot: Codable, Equatable, Identifiable, Sendable {
+    public var role: String
+    public var chunkIndex: Int?
+    public var windowIndex: Int?
+    public var rawJSON: String
+    public var structuredJSON: String
+    public var updatedAt: Date
+    public var id: String { role }
+
+    public init(role: String, chunkIndex: Int? = nil, windowIndex: Int? = nil, rawJSON: String, structuredJSON: String, updatedAt: Date = .now) {
+        self.role = role
+        self.chunkIndex = chunkIndex
+        self.windowIndex = windowIndex
+        self.rawJSON = rawJSON
+        self.structuredJSON = structuredJSON
+        self.updatedAt = updatedAt
     }
 }
 
@@ -349,6 +540,8 @@ public struct TranslationChunk: Codable, Equatable, Identifiable, Sendable {
     public var index: Int
     public var fileIndex: Int
     public var fileName: String
+    public var sectionID: String?
+    public var sectionTitle: String?
     public var source: String
     public var leadingWhitespace: String
     public var trailingWhitespace: String
@@ -365,11 +558,13 @@ public struct TranslationChunk: Codable, Equatable, Identifiable, Sendable {
     public var reviewScore: Int?
     public var needsHumanReview: Bool
 
-    public init(id: UUID = UUID(), index: Int, fileIndex: Int, fileName: String, source: String, leadingWhitespace: String = "", trailingWhitespace: String = "", previousTail: String = "", nextHead: String = "", summary: String = "", translationNotes: [String] = [], memoryBefore: String = "", status: ChunkStatus = .pending, attempts: [TranslationAttempt] = [], explicitRetryPending: Bool? = nil, retryCycleStartIndex: Int? = nil, finalTranslation: String = "", reviewScore: Int? = nil, needsHumanReview: Bool = false) {
+    public init(id: UUID = UUID(), index: Int, fileIndex: Int, fileName: String, sectionID: String? = nil, sectionTitle: String? = nil, source: String, leadingWhitespace: String = "", trailingWhitespace: String = "", previousTail: String = "", nextHead: String = "", summary: String = "", translationNotes: [String] = [], memoryBefore: String = "", status: ChunkStatus = .pending, attempts: [TranslationAttempt] = [], explicitRetryPending: Bool? = nil, retryCycleStartIndex: Int? = nil, finalTranslation: String = "", reviewScore: Int? = nil, needsHumanReview: Bool = false) {
         self.id = id
         self.index = index
         self.fileIndex = fileIndex
         self.fileName = fileName
+        self.sectionID = sectionID
+        self.sectionTitle = sectionTitle
         self.source = source
         self.leadingWhitespace = leadingWhitespace
         self.trailingWhitespace = trailingWhitespace
@@ -429,7 +624,10 @@ public struct TranslationJob: Codable, Equatable, Identifiable, Sendable {
     public var startedAt: Date?
     public var sourceFiles: [SourceDocument]
     public var chunks: [TranslationChunk]
+    public var sections: [DocumentSection]?
     public var guide: TranslationGuide?
+    public var plannerCheckpoint: PlannerCheckpoint?
+    public var agentOutputSnapshots: [AgentOutputSnapshot]?
     public var memory: String
     public var memoryHistory: [MemorySnapshot]
     public var totalTokens: Int
@@ -437,7 +635,7 @@ public struct TranslationJob: Codable, Equatable, Identifiable, Sendable {
     public var translatorTokens: Int
     public var error: String?
 
-    public init(id: UUID = UUID(), name: String, series: Bool, status: JobStatus = .queued, createdAt: Date = .now, updatedAt: Date = .now, startedAt: Date? = nil, sourceFiles: [SourceDocument], chunks: [TranslationChunk], guide: TranslationGuide? = nil, memory: String = "", memoryHistory: [MemorySnapshot] = [], totalTokens: Int = 0, controllerTokens: Int = 0, translatorTokens: Int = 0, error: String? = nil) {
+    public init(id: UUID = UUID(), name: String, series: Bool, status: JobStatus = .queued, createdAt: Date = .now, updatedAt: Date = .now, startedAt: Date? = nil, sourceFiles: [SourceDocument], chunks: [TranslationChunk], sections: [DocumentSection]? = nil, guide: TranslationGuide? = nil, plannerCheckpoint: PlannerCheckpoint? = nil, agentOutputSnapshots: [AgentOutputSnapshot]? = nil, memory: String = "", memoryHistory: [MemorySnapshot] = [], totalTokens: Int = 0, controllerTokens: Int = 0, translatorTokens: Int = 0, error: String? = nil) {
         self.id = id
         self.name = name
         self.series = series
@@ -447,7 +645,10 @@ public struct TranslationJob: Codable, Equatable, Identifiable, Sendable {
         self.startedAt = startedAt
         self.sourceFiles = sourceFiles
         self.chunks = chunks
+        self.sections = sections
         self.guide = guide
+        self.plannerCheckpoint = plannerCheckpoint
+        self.agentOutputSnapshots = agentOutputSnapshots
         self.memory = memory
         self.memoryHistory = memoryHistory
         self.totalTokens = totalTokens
@@ -465,7 +666,7 @@ public struct TranslationJob: Codable, Equatable, Identifiable, Sendable {
     public var flaggedCount: Int { chunks.filter(\.needsHumanReview).count }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, series, status, createdAt, updatedAt, startedAt, sourceFiles, chunks, guide, memory, memoryHistory, totalTokens, controllerTokens, translatorTokens, error
+        case id, name, series, status, createdAt, updatedAt, startedAt, sourceFiles, chunks, sections, guide, plannerCheckpoint, agentOutputSnapshots, memory, memoryHistory, totalTokens, controllerTokens, translatorTokens, error
     }
 }
 
@@ -473,6 +674,7 @@ public enum PipelineEvent: Sendable {
     case status(jobID: UUID, message: String)
     case activity(jobID: UUID, role: String, action: String)
     case stream(jobID: UUID, role: String, kind: String, text: String)
+    case snapshot(jobID: UUID, role: String)
     case chunk(jobID: UUID, chunkIndex: Int)
     case log(jobID: UUID, message: String)
 }

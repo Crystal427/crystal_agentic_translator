@@ -4,12 +4,14 @@ public struct JobModelOutput: Equatable, Sendable {
     public var activity: String
     public var controllerReasoning: String
     public var controllerOutput: String
+    public var isControllerOutputInProgress: Bool
     public var translator: String
 
-    public init(activity: String = "", controllerReasoning: String = "", controllerOutput: String = "", translator: String = "") {
+    public init(activity: String = "", controllerReasoning: String = "", controllerOutput: String = "", isControllerOutputInProgress: Bool = false, translator: String = "") {
         self.activity = activity
         self.controllerReasoning = controllerReasoning
         self.controllerOutput = controllerOutput
+        self.isControllerOutputInProgress = isControllerOutputInProgress
         self.translator = translator
     }
 }
@@ -36,9 +38,10 @@ public struct JobModelOutputCache: Sendable {
 
     public mutating func begin(jobID: UUID, role: String) {
         var output = outputs[jobID] ?? JobModelOutput()
-        if role == "主控" {
+        if isController(role) {
             output.controllerReasoning = ""
             output.controllerOutput = ""
+            output.isControllerOutputInProgress = true
         } else {
             output.translator = ""
         }
@@ -47,7 +50,7 @@ public struct JobModelOutputCache: Sendable {
 
     public mutating func append(jobID: UUID, role: String, kind: String, text: String) {
         var output = outputs[jobID] ?? JobModelOutput()
-        if role == "主控" {
+        if isController(role) {
             if kind == "reasoning" {
                 output.controllerReasoning += text
             } else {
@@ -59,7 +62,17 @@ public struct JobModelOutputCache: Sendable {
         outputs[jobID] = output
     }
 
+    public mutating func completeController(jobID: UUID) {
+        var output = outputs[jobID] ?? JobModelOutput()
+        output.isControllerOutputInProgress = false
+        outputs[jobID] = output
+    }
+
     public mutating func remove(jobID: UUID) {
         outputs.removeValue(forKey: jobID)
+    }
+
+    private func isController(_ role: String) -> Bool {
+        ["主控", "预读", "审校"].contains(role)
     }
 }

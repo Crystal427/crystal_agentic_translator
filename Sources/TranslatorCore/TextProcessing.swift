@@ -37,6 +37,33 @@ public enum TextProcessor {
 }
 
 public enum TextChunker {
+    public static func detectSections(fileIndex: Int, fileName: String, text: String) -> [DocumentSection] {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        var markers: [(offset: Int, title: String, marker: String)] = []
+        var offset = 0
+        for (index, substring) in lines.enumerated() {
+            let line = String(substring)
+            let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if isSectionHeading(value) || isSectionDivider(value) {
+                markers.append((offset, isSectionHeading(value) ? value : "", value))
+            }
+            offset += line.count + (index < lines.count - 1 ? 1 : 0)
+        }
+        guard !markers.isEmpty else {
+            return [DocumentSection(id: "file-\(fileIndex)-section-0", fileIndex: fileIndex, index: 0, title: "", marker: "", startOffset: 0, endOffset: text.count, isExplicit: false)]
+        }
+        var sections: [DocumentSection] = []
+        if markers[0].offset > 0, !text.prefix(markers[0].offset).allSatisfy(\.isWhitespace) {
+            sections.append(DocumentSection(id: "file-\(fileIndex)-section-0", fileIndex: fileIndex, index: 0, title: "", marker: "", startOffset: 0, endOffset: markers[0].offset, isExplicit: false))
+        }
+        for marker in markers {
+            let index = sections.count
+            let endOffset = markers.first(where: { $0.offset > marker.offset })?.offset ?? text.count
+            sections.append(DocumentSection(id: "file-\(fileIndex)-section-\(index)", fileIndex: fileIndex, index: index, title: marker.title, marker: marker.marker, startOffset: marker.offset, endOffset: endOffset))
+        }
+        return sections
+    }
+
     public static func makeChunks(fileIndex: Int, fileName: String, text: String, maxCharacters: Int, contextCharacters: Int) -> [TranslationChunk] {
         guard !text.isEmpty else { return [] }
         let limit = max(256, maxCharacters)
@@ -55,7 +82,7 @@ public enum TextChunker {
         }
 
         for line in lines where !line.isEmpty {
-            if isChapterHeading(line), current.count >= Int(Double(limit) * 0.35) {
+            if isSectionHeading(line.trimmingCharacters(in: .whitespacesAndNewlines)) || isSectionDivider(line.trimmingCharacters(in: .whitespacesAndNewlines)) {
                 appendCurrent()
             }
             for fragment in splitLongLine(line, limit: limit) {
@@ -75,7 +102,10 @@ public enum TextChunker {
         }
         appendCurrent()
 
-        if rawChunks.count > 1, let last = rawChunks.last, last.count < Int(Double(limit) * 0.20) {
+        if rawChunks.count > 1, let last = rawChunks.last, last.count < Int(Double(limit) * 0.20),
+           let firstLine = last.components(separatedBy: "\n").first,
+           !isSectionHeading(firstLine.trimmingCharacters(in: .whitespacesAndNewlines)),
+           !isSectionDivider(firstLine.trimmingCharacters(in: .whitespacesAndNewlines)) {
             let previousIndex = rawChunks.count - 2
             let previous = rawChunks[previousIndex]
             let joined = previous + last
@@ -139,11 +169,21 @@ public enum TextChunker {
         return result
     }
 
-    private static func isChapterHeading(_ line: String) -> Bool {
-        let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.hasPrefix("第") && (value.contains("章") || value.contains("話") || value.contains("回"))
-            || value.lowercased().hasPrefix("chapter ")
-            || ["序章", "プロローグ", "prologue"].contains { value.localizedCaseInsensitiveCompare($0) == .orderedSame }
+    private static func isSectionHeading(_ value: String) -> Bool {
+        guard !value.isEmpty else { return false }
+        let patterns = [
+            #"^第[0-9０-９一二三四五六七八九十百千〇零]+[章节節話回夜幕].*$"#,
+            #"^[0-9０-９一二三四五六七八九十百千〇零]+[、.．:：)）].{0,60}$"#,
+            #"^(?:序章|終章|序幕|終幕|プロローグ|エピローグ|前書き|後書き)$"#,
+            #"^(?:chapter|section|part|episode|prologue|epilogue)\b.*$"#
+        ]
+        return patterns.contains { value.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil }
+    }
+
+    private static func isSectionDivider(_ value: String) -> Bool {
+        let marks = Array(value.filter { !$0.isWhitespace })
+        guard marks.count >= 3 else { return false }
+        return marks.allSatisfy { "*＊◇◆※—─━=－ｰー".contains($0) }
     }
 
     private static func isSentenceEnding(_ character: Character) -> Bool {

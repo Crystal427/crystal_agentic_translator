@@ -1,7 +1,7 @@
 import Foundation
 
 public actor JobStore {
-    public let rootURL: URL
+    public nonisolated let rootURL: URL
     private let fileManager: FileManager
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
