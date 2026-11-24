@@ -63,6 +63,17 @@ final class TextProcessingTests: XCTestCase {
         XCTAssertTrue(chunks.allSatisfy { !$0.source.isEmpty })
     }
 
+    func testLeadingBlankLinesBeforeSectionHeadingDoNotCreateEmptyChunk() {
+        let source = "\n\n\n第一夜\n本文。"
+        let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "夢十夜.txt", text: source, maxCharacters: 900, contextCharacters: 0)
+
+        XCTAssertEqual(chunks.map(\.rawText).joined(), source)
+        XCTAssertEqual(chunks.count, 1)
+        XCTAssertTrue(chunks.allSatisfy { !$0.source.isEmpty })
+        XCTAssertEqual(chunks.first?.leadingWhitespace, "\n\n\n")
+        XCTAssertTrue(chunks.first?.source.hasPrefix("第一夜") == true)
+    }
+
     func testZeroChunkContextIsEmptyOnBothSides() {
         let source = String(repeating: "a", count: 600)
         let chunks = TextChunker.makeChunks(fileIndex: 0, fileName: "context.txt", text: source, maxCharacters: 256, contextCharacters: 0)

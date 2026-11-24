@@ -102,6 +102,21 @@ public enum TextChunker {
         }
         appendCurrent()
 
+        var retainedChunks: [String] = []
+        var pendingWhitespace = ""
+        for raw in rawChunks {
+            if raw.allSatisfy(\.isWhitespace) {
+                pendingWhitespace += raw
+            } else {
+                retainedChunks.append(pendingWhitespace + raw)
+                pendingWhitespace = ""
+            }
+        }
+        if !pendingWhitespace.isEmpty, !retainedChunks.isEmpty {
+            retainedChunks[retainedChunks.count - 1] += pendingWhitespace
+        }
+        rawChunks = retainedChunks
+
         if rawChunks.count > 1, let last = rawChunks.last, last.count < Int(Double(limit) * 0.20),
            let firstLine = last.components(separatedBy: "\n").first,
            !isSectionHeading(firstLine.trimmingCharacters(in: .whitespacesAndNewlines)),
