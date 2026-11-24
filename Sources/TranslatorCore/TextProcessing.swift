@@ -1,0 +1,167 @@
+import Foundation
+
+public enum TextProcessingError: Error, LocalizedError {
+    case unsupportedEncoding
+    case emptyInput
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupportedEncoding: return "The file encoding is not supported. Save the file as UTF-8 or UTF-16 and try again."
+        case .emptyInput: return "The source file is empty."
+        }
+    }
+}
+
+public enum TextProcessor {
+    public static func decode(_ data: Data) throws -> String {
+        if data.starts(with: [0xEF, 0xBB, 0xBF]), let text = String(data: data.dropFirst(3), encoding: .utf8) { return text }
+        if data.starts(with: [0xFF, 0xFE]), let text = String(data: data.dropFirst(2), encoding: .utf16LittleEndian) { return text }
+        if data.starts(with: [0xFE, 0xFF]), let text = String(data: data.dropFirst(2), encoding: .utf16BigEndian) { return text }
+        if let text = String(data: data, encoding: .utf8) { return text }
+        let shiftJIS = String(data: data, encoding: .shiftJIS)
+        if let shiftJIS, shiftJIS.unicodeScalars.contains(where: { (0x3040...0x30FF).contains($0.value) }) { return shiftJIS }
+        if let text = String(data: data, encoding: String.Encoding(rawValue: 0x80000632)) { return text }
+        if let shiftJIS { return shiftJIS }
+        if let text = String(data: data, encoding: .windowsCP1252) { return text }
+        throw TextProcessingError.unsupportedEncoding
+    }
+
+    public static func normalize(_ text: String) -> String {
+        let newlines = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let lines = newlines.split(separator: "\n", omittingEmptySubsequences: false).map {
+            String($0).replacingOccurrences(of: "[\\t ]+$", with: "", options: .regularExpression)
+        }
+        let trimmed = lines.joined(separator: "\n")
+        return trimmed.replacingOccurrences(of: "\n{5,}", with: "\n\n\n\n", options: .regularExpression)
+    }
+}
+
+public enum TextChunker {
+    public static func makeChunks(fileIndex: Int, fileName: String, text: String, maxCharacters: Int, contextCharacters: Int) -> [TranslationChunk] {
+        guard !text.isEmpty else { return [] }
+        let limit = max(256, maxCharacters)
+        let components = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let lines = components.enumerated().map { index, line in
+            String(line) + (index < components.count - 1 ? "\n" : "")
+        }
+        var rawChunks: [String] = []
+        var current = ""
+
+        func appendCurrent() {
+            if !current.isEmpty {
+                rawChunks.append(current)
+                current = ""
+            }
+        }
+
+        for line in lines where !line.isEmpty {
+            if isChapterHeading(line), current.count >= Int(Double(limit) * 0.35) {
+                appendCurrent()
+            }
+            for fragment in splitLongLine(line, limit: limit) {
+                if current.count + fragment.count > limit {
+                    if let breakIndex = sceneBreak(in: current, minimumOffset: Int(Double(limit) * 0.75)) {
+                        let prefix = String(current[..<breakIndex])
+                        let suffix = String(current[breakIndex...])
+                        current = suffix
+                        if !prefix.isEmpty { rawChunks.append(prefix) }
+                        if current.count + fragment.count > limit { appendCurrent() }
+                    } else {
+                        appendCurrent()
+                    }
+                }
+                current += fragment
+            }
+        }
+        appendCurrent()
+
+        if rawChunks.count > 1, let last = rawChunks.last, last.count < Int(Double(limit) * 0.20) {
+            let previous = rawChunks[rawChunks.count - 2]
+            let joined = previous + last
+            let target = joined.count / 2
+            let split = nearestLineBoundary(in: joined, to: target) ?? joined.index(joined.startIndex, offsetBy: target)
+            rawChunks[rawChunks.count - 2] = String(joined[..<split])
+            rawChunks[rawChunks.count - 1] = String(joined[split...])
+        }
+
+        return rawChunks.enumerated().map { index, raw in
+            let (leading, bodyAndTrailing) = takeLeadingWhitespace(raw)
+            let (body, trailing) = takeTrailingWhitespace(bodyAndTrailing)
+            return TranslationChunk(
+                index: index,
+                fileIndex: fileIndex,
+                fileName: fileName,
+                source: body,
+                leadingWhitespace: leading,
+                trailingWhitespace: trailing,
+                previousTail: index > 0 ? contextTail(rawChunks[index - 1], count: contextCharacters) : "",
+                nextHead: index + 1 < rawChunks.count ? contextHead(rawChunks[index + 1], count: contextCharacters) : ""
+            )
+        }
+    }
+
+    private static func splitLongLine(_ line: String, limit: Int) -> [String] {
+        guard line.count > limit else { return [line] }
+        let characters = Array(line)
+        var result: [String] = []
+        var start = 0
+        while start < characters.count {
+            let remaining = characters.count - start
+            if remaining <= limit {
+                result.append(String(characters[start...]))
+                break
+            }
+            let upper = start + limit
+            let boundary = (start..<upper).last(where: { isSentenceEnding(characters[$0]) && $0 - start > limit / 2 }).map { $0 + 1 } ?? upper
+            result.append(String(characters[start..<boundary]))
+            start = boundary
+        }
+        return result
+    }
+
+    private static func isChapterHeading(_ line: String) -> Bool {
+        let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.hasPrefix("第") && (value.contains("章") || value.contains("話") || value.contains("回"))
+            || value.lowercased().hasPrefix("chapter ")
+            || ["序章", "プロローグ", "prologue"].contains { value.localizedCaseInsensitiveCompare($0) == .orderedSame }
+    }
+
+    private static func isSentenceEnding(_ character: Character) -> Bool {
+        "。！？!?．.」』”’".contains(character)
+    }
+
+    private static func sceneBreak(in text: String, minimumOffset: Int) -> String.Index? {
+        guard let range = text.range(of: "\n\n", options: .backwards) else { return nil }
+        return text.distance(from: text.startIndex, to: range.lowerBound) >= minimumOffset ? range.lowerBound : nil
+    }
+
+    private static func nearestLineBoundary(in text: String, to offset: Int) -> String.Index? {
+        let candidates = text.indices.filter { $0 > text.startIndex && text[$0] == "\n" }
+        return candidates.min { abs(text.distance(from: text.startIndex, to: $0) - offset) < abs(text.distance(from: text.startIndex, to: $1) - offset) }
+    }
+
+    private static func takeLeadingWhitespace(_ text: String) -> (String, String) {
+        let prefix = String(text.prefix(while: \.isWhitespace))
+        return (prefix, String(text.dropFirst(prefix.count)))
+    }
+
+    private static func takeTrailingWhitespace(_ text: String) -> (String, String) {
+        let suffix = String(text.reversed().prefix(while: { $0.isWhitespace }).reversed())
+        guard !suffix.isEmpty else { return (text, "") }
+        return (String(text.dropLast(suffix.count)), suffix)
+    }
+
+    private static func contextTail(_ text: String, count: Int) -> String {
+        guard count > 0, text.count > count else { return text }
+        let suffix = String(text.suffix(count))
+        guard let ending = suffix.firstIndex(where: isSentenceEnding) else { return suffix }
+        return String(suffix[suffix.index(after: ending)...])
+    }
+
+    private static func contextHead(_ text: String, count: Int) -> String {
+        guard count > 0 else { return "" }
+        let prefix = String(text.prefix(count))
+        guard let ending = prefix.firstIndex(where: isSentenceEnding) else { return prefix }
+        return String(prefix[...ending])
+    }
+}

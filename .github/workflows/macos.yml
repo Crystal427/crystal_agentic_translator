@@ -1,0 +1,21 @@
+name: macOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-package:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run regression tests
+        run: swift test
+      - name: Package native macOS app
+        run: ./scripts/package-macos-app.sh "$RUNNER_TEMP/artifacts"
+      - name: Upload app ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrystalTranslator-macOS
+          path: ${{ runner.temp }}/artifacts/CrystalTranslator-macOS.zip
