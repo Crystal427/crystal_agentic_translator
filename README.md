@@ -68,6 +68,8 @@ The client uses LM Studio's documented native v1 management routes:
 
 Inference uses the documented OpenAI-compatible `POST /v1/chat/completions` endpoint with streaming and JSON-schema response formats for controller tasks. Translator requests explicitly send `reasoning_effort: "none"` as specified by the design. Model management is only called when a user runs a task; the app does not download models or modify LM Studio configuration. With `swap` scheduling, it unloads only the configured counterpart model instances, never unrelated loaded models.
 
+Plain HTTP is accepted only for loopback LM Studio hosts; remote servers must use HTTPS. Base URLs containing embedded credentials, a query, or a fragment are rejected.
+
 Official documentation:
 
 - [LM Studio REST API](https://lmstudio.ai/docs/developer/rest)
