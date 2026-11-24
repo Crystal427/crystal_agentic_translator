@@ -346,20 +346,24 @@ public struct TranslationPipeline: Sendable {
                 }
                 job.chunks[index].attempts[attemptIndex].review = review
                 let cycleStart = min(job.chunks[index].attempts.count, max(0, job.chunks[index].retryCycleStartIndex ?? 0))
-                if let best = bestAttempt(for: job.chunks[index], startingAt: cycleStart) {
-                    job.chunks[index].finalTranslation = best.translation
-                    job.chunks[index].reviewScore = best.review?.score
-                }
                 let passed = report.hardFailures.isEmpty && review.verdict == "pass" && review.score >= settings.passScore
                 if passed {
+                    job.chunks[index].finalTranslation = attempt.translation
+                    job.chunks[index].reviewScore = review.score
                     job.chunks[index].status = .done
                     job.chunks[index].needsHumanReview = false
-                } else if attemptIndex - cycleStart < settings.maxRetries {
-                    job.chunks[index].status = .scouted
-                    retry.append(index)
                 } else {
-                    job.chunks[index].status = .flagged
-                    job.chunks[index].needsHumanReview = true
+                    if let best = bestAttempt(for: job.chunks[index], startingAt: cycleStart) {
+                        job.chunks[index].finalTranslation = best.translation
+                        job.chunks[index].reviewScore = best.review?.score
+                    }
+                    if attemptIndex - cycleStart < settings.maxRetries {
+                        job.chunks[index].status = .scouted
+                        retry.append(index)
+                    } else {
+                        job.chunks[index].status = .flagged
+                        job.chunks[index].needsHumanReview = true
+                    }
                 }
                 job.updatedAt = .now
                 try await store.save(job)

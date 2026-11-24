@@ -317,6 +317,29 @@ final class PersistenceAndPipelineTests: XCTestCase {
         XCTAssertGreaterThan(finished.translatorTokens, 0)
     }
 
+    func testPassingRetryBecomesFinalEvenWhenRejectedDraftScoredHigher() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = JobStore(rootURL: root)
+        let pass80 = #"{"scores":{"accuracy":8,"completeness":8,"terminology":8,"fluency":8,"style":8},"issues":[],"revision_instructions":[],"verdict":"pass","comment":"通过。"}"#
+        let transport = MockLMStudioTransport(chatResponses: ["通过后的译文。", pass80])
+        let settings = AppSettings(controllerModel: "controller", translatorModel: "translator", passScore: 70, maxRetries: 1, pauseAfterOverview: false)
+        var rejectedAttempt = TranslationAttempt(translation: "高分但驳回的旧稿。", temperature: 0.5)
+        rejectedAttempt.review = TranslationReview(verdict: "revise", comment: "尚未通过", score: 90)
+        let chunk = TranslationChunk(index: 0, fileIndex: 0, fileName: "story.txt", source: "Hello there.", status: .scouted, attempts: [rejectedAttempt])
+        var job = TranslationJob(name: "Accepted retry", series: false, sourceFiles: [SourceDocument(name: "story.txt", text: "Hello there.")], chunks: [chunk])
+        job.guide = TranslationGuide(titleZh: "测试作品", sourceLanguage: "英语")
+        job.status = .paused
+        try await store.save(job)
+        let pipeline = TranslationPipeline(store: store, client: LMStudioClient(baseURL: "http://127.0.0.1:1234", transport: transport))
+
+        let finished = try await pipeline.run(jobID: job.id, settings: settings)
+
+        XCTAssertEqual(finished.chunks[0].status, .done)
+        XCTAssertEqual(finished.chunks[0].finalTranslation, "通过后的译文。")
+        XCTAssertEqual(finished.chunks[0].reviewScore, 80)
+    }
+
     func testBatchScoutsUseUpdatedGuideAndLaterTranslationUsesPriorDraft() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
