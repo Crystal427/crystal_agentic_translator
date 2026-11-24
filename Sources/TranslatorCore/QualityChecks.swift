@@ -17,6 +17,7 @@ public enum TranslationQuality {
         source: String,
         translation: String,
         sourceLanguage: String,
+        targetLanguage: String = "简体中文",
         glossary: [GlossaryEntry],
         previousTranslation: String,
         finishReason: String? = nil
@@ -36,7 +37,7 @@ public enum TranslationQuality {
             findings.append(.init(message: "译文含有连续重复文本", hard: true))
         }
         let language = inferLanguage(source: source, requested: sourceLanguage)
-        if source.count >= 200 {
+        if isChineseTarget(targetLanguage), source.count >= 200 {
             let ratio = Double(translation.count) / Double(max(1, source.count))
             let bounds: ClosedRange<Double> = switch language {
             case .japanese: 0.4...1.4
@@ -90,6 +91,11 @@ public enum TranslationQuality {
 
     private enum SourceLanguage {
         case japanese, korean, english, other
+    }
+
+    private static func isChineseTarget(_ language: String) -> Bool {
+        let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "zh" || normalized.hasPrefix("zh-") || normalized.contains("中文") || normalized.contains("chinese")
     }
 
     private static func inferLanguage(source: String, requested: String) -> SourceLanguage {

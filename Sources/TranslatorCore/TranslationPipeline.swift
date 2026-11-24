@@ -300,6 +300,7 @@ public struct TranslationPipeline: Sendable {
                     source: chunk.source,
                     translation: attempt.translation,
                     sourceLanguage: guide.sourceLanguage,
+                    targetLanguage: settings.targetLanguage,
                     glossary: PromptBuilder.relevantGlossary(in: chunk.source, guide: guide),
                     previousTranslation: previous,
                     finishReason: attempt.finishReason

@@ -73,6 +73,32 @@ final class QualityAndPromptTests: XCTestCase {
         XCTAssertTrue(report.hardFailures.contains { $0.message.contains("连续重复") })
     }
 
+    func testLengthAndResidualScriptChecksAreLimitedToChineseTargets() {
+        let source = [
+            "The old house stood beside a river.",
+            "Anna carried the blue letter upstairs.",
+            "Rain covered the narrow road.",
+            "Tomorrow the garden would bloom again.",
+            "She waited until the clock struck midnight.",
+            "Beyond the hill, a train crossed the valley."
+        ].joined(separator: " ")
+        let translation = [
+            "La vieille maison se dressait près d'une rivière.",
+            "Anna monta avec la lettre bleue.",
+            "La pluie recouvrait la route étroite.",
+            "Le jardin fleurirait de nouveau demain.",
+            "Elle attendit que l'horloge sonne minuit.",
+            "Au-delà de la colline, un train traversa la vallée."
+        ].joined(separator: " ")
+        let french = TranslationQuality.inspect(source: source, translation: translation, sourceLanguage: "English", targetLanguage: "French", glossary: [], previousTranslation: "")
+        XCTAssertFalse(french.hardFailures.contains { $0.message.contains("长度比异常") })
+        XCTAssertFalse(french.hardFailures.contains { $0.message.contains("残留原文字符比例") })
+
+        let chinese = TranslationQuality.inspect(source: source, translation: translation, sourceLanguage: "English", targetLanguage: "简体中文", glossary: [], previousTranslation: "")
+        XCTAssertTrue(chinese.hardFailures.contains { $0.message.contains("长度比异常") })
+        XCTAssertTrue(chinese.hardFailures.contains { $0.message.contains("残留原文字符比例") })
+    }
+
     func testFallbackReviewUsesDesignScorePolicy() {
         let failed = QualityReport(findings: [.init(message: "截断", hard: true)])
         XCTAssertEqual(TranslationQuality.fallbackReview(for: failed).score, 30)
